@@ -1,0 +1,1430 @@
+---
+title: "BTT_LVAD"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+rm(list=ls())
+library(knitr)
+opts_chunk$set(comment = NA, prompt = FALSE, cache = FALSE, echo = TRUE,
+                      results = "asis")
+
+library(tidyverse)
+library(haven)
+library(rmdformats)
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(gtsummary)
+library(cowplot)
+library(survival)
+library(survminer)
+library(ggsurvfit)
+library(cmprsk)
+library(tidycmprsk)
+
+```
+
+```{r load data}
+
+  cand_thor = read_sas("Downloads/cand_thor2024.sas7bdat") %>%  
+    zap_formats() %>% zap_labels()
+  
+  just_form_hr = read_sas("Downloads/JustFormHR.sas7bdat") %>%  
+    zap_formats() %>% zap_labels()
+  
+  just_form_hr_data_link = read_sas("C:/Users/danielahn/Downloads/JustFormHRDataLink.sas7bdat") %>%  
+    zap_formats() %>% zap_labels()
+  
+  just_form_hr_stat1 =  read_sas("C:/Users/danielahn/Downloads/JustFormHRStat1.sas7bdat") %>%  
+    zap_formats() %>% zap_labels()
+
+  just_form_hr_stat2 =  read_sas("C:/Users/danielahn/Downloads/JustFormHRStat2.sas7bdat") %>%  
+    zap_formats() %>% zap_labels()
+  
+  just_form_hr_stat4 =  read_sas("C:/Users/danielahn/Downloads/JustFormHRStat4.sas7bdat") %>%  
+    zap_formats() %>% zap_labels()
+  
+  risk_strat_data_hr =  read_sas("C:/Users/danielahn/Downloads/RiskStratDataHR.sas7bdat") %>%  
+    zap_formats() %>% zap_labels()
+  
+  thor_support_device =  read_sas("C:/Users/danielahn/Downloads/ThorSupportDevice.sas7bdat") %>%  
+    zap_formats() %>% zap_labels()
+
+
+```
+
+```{r}
+#Kenley change
+#Added this--confused--otherwise these tables don't seem to exist
+JustFormHRDataLink = read_sas("Downloads/HRstatjust2403 2/JustFormHRDataLink.sas7bdat", NULL)
+
+JustFormHR = read_sas("Downloads/HRstatjust2403 2/JustFormHR.sas7bdat", NULL) 
+
+RiskStratDataHR = read_sas("Downloads/HRstatjust2403 2/RiskStratDataHR.sas7bdat", NULL) 
+
+JustFormHRStat1 = read_sas("Downloads/HRstatjust2403 2/JustFormHRStat1.sas7bdat", NULL) 
+
+JustFormHRStat2 = read_sas("Downloads/HRstatjust2403 2/JustFormHRStat2.sas7bdat", NULL) 
+
+JustFormHRStat4 = read_sas("Downloads/HRstatjust2403 2/JustFormHRStat4.sas7bdat", NULL)
+
+ThorSupportDevice = read_sas("Downloads/HRstatjust2403 2/ThorSupportDevice.sas7bdat", NULL) 
+
+stathist_thor24 = read_sas("Downloads/stathist_thor24.sas7bdat", NULL) 
+
+cand_thor24 = read_sas("Downloads/cand_thor24.sas7bdat", NULL) 
+
+```
+
+# Link data sets
+
+```{r link data sets}
+
+# just_form_hr_data_link = JustFormHRDataLink
+# just_form_hr = JustFormHR
+# 
+# risk_strat_data_hr = RiskStratDataHR %>% 
+#   mutate(ChangeDt = floor_date(ChangeDate, unit = "day")) %>%
+#   select(-ChangeDate) %>% 
+#   full_join(just_form_hr_data_link %>%
+#               dplyr::select(-ChangeDate, -InitialFormJustId), by = "WlregAuditId") %>% 
+#   mutate(PX_ID = px_id) %>% 
+#   dplyr::select(-px_id) %>%
+#   
+#   # removes entries that have valid WlregAuditId but missing JustId
+#   filter(!is.na(JustId)) %>%
+#   
+#   # there are instances in which two just. forms were submitted on the same day for a
+#   # single PX_ID. The time step in this process is one day, so these are removed
+#   group_by(PX_ID, ChangeDt) %>% slice_max(JustId) %>% 
+#   ungroup() %>% 
+#   
+#   dplyr::select(-RiskStratId, -WlregAuditId, -ChangeUserId, -ChangeRequestorId,
+#          -HemoDataObtained, -HemoDataObtainedOther, -HemoPcwpOrLvedp) %>% 
+#   select(-(ends_with("St"))) %>% 
+#   select(-(starts_with("CandHist"))) %>%
+#   select(-(starts_with("SenData"))) %>%
+#   select(-(ends_with("Type"))) %>%
+#   select(-(ends_with("Perf"))) %>%
+#   relocate(ChangeDt:PX_ID)
+# 
+# 
+# # right_join to filter out erroneous forms, as above
+# just_form_hr_data_link = just_form_hr_data_link %>%
+#   select(-ChangeDate) %>% 
+#   right_join(risk_strat_data_hr %>% 
+#               select(ChangeDt, JustId, PX_ID), by = "JustId")
+# 
+# # right_join to filter out erroneous forms, as above
+# just_form_hr = just_form_hr %>% 
+#   select(JustId, RequestedCandStatCd, RequestedCandStat_descrip,
+#          ExtensionNumber, Exception, ThorSupportDevicePrimary,
+#          ThorSupportDeviceSecondary, descrip, AdmittedToHospital, 
+#          FormEffectiveDt, FormExpirationDt, FormStatus_descrip, DeviceRecallException, IsActiveForm) %>%
+#   mutate(listing_description = descrip) %>% 
+#   select(-descrip) %>% 
+#   right_join(just_form_hr_data_link %>% 
+#               select(-WlregAuditId, -InitialFormJustId), by = "JustId")
+# 
+#   # status_just_episode provides same info as stathist_thor, so not including it
+#   # # join status episode information by JustId
+#   # full_join(status_just_episode %>% select(JustId:EndDate), by = "JustId")
+# 
+# # thor_support_device seems to include many duplicates, include at your own risk
+# 
+# just_form_hr_stat1 = JustFormHRStat1 %>% 
+#   select(-ChangeDate) %>%
+#   left_join(just_form_hr_data_link %>% 
+#               select(JustId, PX_ID, ChangeDt), by = "JustId")
+# 
+# just_form_hr_stat2 = JustFormHRStat2 %>% 
+#   select(-ChangeDate) %>%
+#   left_join(just_form_hr_data_link %>% 
+#               select(JustId, PX_ID, ChangeDt), by = "JustId")
+# 
+# just_form_hr_stat3 = JustFormHRStat3 %>% 
+#   select(-ChangeDate) %>%
+#   left_join(just_form_hr_data_link %>% 
+#               select(JustId, PX_ID, ChangeDt), by = "JustId")
+# 
+# just_form_hr_stat4 = JustFormHRStat4 %>% 
+#   select(-ChangeDate) %>%
+#   left_join(just_form_hr_data_link %>% 
+#               select(JustId, PX_ID, ChangeDt), by = "JustId")
+
+```
+
+
+# Filter and pivot data by relevant dates
+
+```{r}
+# 
+# # Filter to candidates with an iabp or impella implant within our cohort dates
+# # Code fixed by Kenley to add missing parentheses
+# cand_list = cand_list %>% filter(durable_lvad_date >= mdy("10-18-2018") & durable_lvad_date <= mdy("12-31-2023"))
+# 
+# #Molly
+# # 30 patients have multiple listings, separate and filter out ineligible multi-listed patients
+# cand_singles = cand_list %>% group_by(PERS_ID) %>% filter(n() == 1)
+# 
+# cand_multiples = cand_list %>% group_by(PERS_ID) %>% filter(n() > 1) %>% arrange(CAN_LISTING_DT) %>% 
+#   mutate(CAN_REM_CD = ifelse(is.na(CAN_REM_CD), 999, CAN_REM_CD))
+# 
+# cand_multiples1 = cand_multiples %>% filter(any(CAN_REM_CD == 7)) %>%
+#   mutate(Int = interval(CAN_LISTING_DT, CAN_LAST_ACT_STAT_DT),
+#          OVERLAPPING = map(seq_along(Int), function(x){
+#            y = setdiff(seq_along(Int), x)
+#            return(any(int_overlaps(Int[x], Int[y])))}))
+# 
+# cand_multiples1.1 = cand_multiples1 %>% filter(all(OVERLAPPING == TRUE)) %>% 
+#   mutate(Observation_Number = row_number()) 
+# 
+# cand_multiples1.1.1 = cand_multiples1.1 %>% filter(n() == 2) %>% 
+#   mutate(
+#     CAN_REM_DT = case_when(
+#       Observation_Number == 1 ~ lead(CAN_LISTING_DT) - 1,
+#       TRUE ~ CAN_REM_DT),
+#     TRANSFER = 1)
+# 
+# cand_multiples1.1.2 = cand_multiples1.1 %>% filter(n() > 2) %>% slice_tail(n = 1)
+# 
+# cand_multiples1.2 = cand_multiples1 %>% filter(any(OVERLAPPING == FALSE)) %>% slice_tail(n = 1)
+# 
+# cand_multiples2 = cand_multiples %>% filter(all(CAN_REM_CD != 7))
+# 
+# cand_multiples2.1 = cand_multiples2 %>% filter(any(CAN_REM_CD == 4)) %>% filter(CAN_REM_CD == 4)
+# 
+# cand_multiples2.2 = cand_multiples2 %>% filter(all(CAN_REM_CD != 4)) %>% slice(1)
+# 
+# cand_list = rbind(cand_singles, cand_multiples1.1.1, cand_multiples1.1.2, cand_multiples1.2, cand_multiples2.1, cand_multiples2.2) %>%
+#   select(-Int, -OVERLAPPING, -Observation_Number)
+# 
+# 
+# 
+# #We are including patients with both IABP and impella (if they are implanted on different dates)
+# #Code added by Kenley to remove cases with both IABP and impella
+# #cand_list = cand_list %>% filter(!(!is.na(iabp_date) & !is.na(impella_date)))
+# 
+# cand_list = cand_list %>%
+#   mutate(
+#     death_date = case_when(
+#       !is.na(PERS_OPTN_DEATH_DT) ~ PERS_OPTN_DEATH_DT,
+#       is.na(PERS_OPTN_DEATH_DT) & !is.na(PERS_SSA_DEATH_DT) ~ PERS_SSA_DEATH_DT,
+#       is.na(PERS_OPTN_DEATH_DT) & is.na(PERS_SSA_DEATH_DT) & !is.na(CAN_DEATH_DT) ~ CAN_DEATH_DT)) %>%
+#   filter(WL_ORG == "HR") %>% select(-c("CAN_DEATH_DT", "PERS_SSA_DEATH_DT", "PERS_OPTN_DEATH_DT", "WL_ORG")) 
+# 
+# #Molly
+# #add in status data
+# cand_list1 = cand_list %>% left_join(stathist_thor24 %>% select(PX_ID, CANHX_BEGIN_DT, CANHX_END_DT, CANHX_STAT_CD)) %>% group_by(PX_ID) %>%
+#   arrange(CANHX_BEGIN_DT) %>% filter(CANHX_END_DT >= durable_lvad_date) %>%
+#   left_join(just_form_hr %>% select(PX_ID, JustId, RequestedCandStatCd, FormEffectiveDt, FormExpirationDt, FormStatus_descrip, IsActiveForm)) %>% group_by(PX_ID, CANHX_BEGIN_DT) 
+# 
+# cand_list1 = cand_list1 %>% filter(CANHX_STAT_CD == 2999 | (CANHX_STAT_CD == RequestedCandStatCd & CANHX_BEGIN_DT >= FormEffectiveDt & CANHX_BEGIN_DT <= FormExpirationDt) | (CANHX_STAT_CD == RequestedCandStatCd & REC_TX_DT >= FormEffectiveDt & REC_TX_DT <= FormExpirationDt)) %>% 
+#   group_by(PX_ID, CANHX_BEGIN_DT) %>% arrange(CANHX_BEGIN_DT, FormEffectiveDt)
+# 
+# cand_list1.1 = cand_list1 %>% group_by(PX_ID, CANHX_BEGIN_DT) %>% filter(CANHX_STAT_CD == 2999) %>% slice(1) %>%
+#   mutate(JustId = NA, RequestedCandStatCd = NA, FormEffectiveDt = NA, FormExpirationDt = NA, FormStatus_descrip = NA, IsActiveForm = NA)
+# 
+# cand_list1.2 = cand_list1 %>% group_by(PX_ID, CANHX_BEGIN_DT) %>% filter((CANHX_STAT_CD == RequestedCandStatCd & CANHX_BEGIN_DT >= FormEffectiveDt & CANHX_BEGIN_DT <= FormExpirationDt) | (CANHX_STAT_CD == RequestedCandStatCd & REC_TX_DT >= FormEffectiveDt & REC_TX_DT <= FormExpirationDt))
+# 
+# cand_list1 = rbind(cand_list1.1, cand_list1.2) %>% ungroup() %>% group_by(PERS_ID, PX_ID) %>% arrange(PERS_ID, PX_ID, CANHX_BEGIN_DT)
+# 
+# cand_list1.1 = cand_list1 %>% filter(TRANSFER == 1) %>% filter(CANHX_BEGIN_DT < CAN_REM_DT)
+# 
+# cand_list1.2 = cand_list1 %>% filter(TRANSFER != 1 | is.na(TRANSFER))
+# 
+# cand_list1 = rbind(cand_list1.1, cand_list1.2)
+# 
+# 
+# status4complications = just_form_hr_stat4 %>% select(PX_ID, JustId, starts_with("Criteria")) %>% 
+#   left_join(just_form_hr %>% select(JustId, Exception, DeviceRecallException, FormEffectiveDt, FormExpirationDt, FormStatus_descrip, listing_description, IsActiveForm, RequestedCandStatCd), by = "JustId") %>%
+#   mutate(
+#     DeviceRecallException = ifelse(is.na(DeviceRecallException), 0, DeviceRecallException),
+#     Reason_For_Status = case_when(
+#       CriteriaLvadSupport == 1 ~ "LVAD, Status 4",
+#       CriteriaInotropeSupport == 1 ~ "Inotropes, Status 4",
+#       CriteriaHeartDisease == 1 ~ "CHD, Status 4",
+#       CriteriaIschemicHeart == 1 ~ "Ischemic Heart Disease, Status 4",
+#       CriteriaCardiomyopathy == 1 ~ "Cardiomyopathy, Status 4",
+#       CriteriaRetransplant == 1 ~ "Re-Tx, Status 4",
+#       DeviceRecallException == 1 ~ "Device Recall, Status 4",
+#       Exception == 1 ~ "Exception, Status 4")) %>%
+#     select(PX_ID, JustId, FormEffectiveDt, FormExpirationDt, FormStatus_descrip, listing_description, Reason_For_Status, IsActiveForm, RequestedCandStatCd)
+# 
+# status3complications = just_form_hr_stat3 %>% select(PX_ID, JustId, starts_with("Criteria")) %>% 
+#   left_join(just_form_hr %>% select(JustId, Exception, DeviceRecallException, FormEffectiveDt, FormExpirationDt, FormStatus_descrip, listing_description, IsActiveForm, RequestedCandStatCd), by = "JustId") %>%
+#   # filter(CriteriaMcsdWithHemo == 1 | CriteriaMcsdWithPump == 1 | CriteriaMcsdWithRhf == 1 | CriteriaMcsdInfection == 1 |  CriteriaMcsdMucosalBleed == 1 | CriteriaMcsdWithAI == 1 | DeviceRecallException == 1) %>%
+#   mutate(
+#     DeviceRecallException = ifelse(is.na(DeviceRecallException), 0, DeviceRecallException),
+#     Reason_For_Status = case_when(
+#       CriteriaMcsdWithHemo == 1 ~ "Hemolysis, Status 3",
+#       CriteriaMcsdWithPump == 1 ~ "Pump Thrombosis, Status 3",
+#       CriteriaMcsdWithRhf == 1 ~ "Right Heart Failure, Status 3",
+#       CriteriaMcsdInfection == 1 ~ "Device Infection, Status 3",
+#       CriteriaMcsdMucosalBleed == 1 ~ "Mucosal Bleeding, Status 3",
+#       CriteriaMcsdWithAI == 1 ~ "Aortic Insufficiency, Status 3",
+#       DeviceRecallException == 1 ~ "Device Recall, Status 3",
+#       CriteriaVaEcmoSupport == 1 ~ "VA ECMO after 7 Days, Status 3",
+#       CriteriaInotropeSupport == 1 ~ "Inotropes, Status 3",
+#       CriteriaPercuSupport == 1 ~ "PEVAD after 2 Weeks, Status 3",
+#       CriteriaIabpSupport == 1 ~ "IABP after 2 Weeks, Status 3",
+#       CriteriaMcsdSupport == 1 ~ "LVAD with Life Threatening VA after 7 Days, Status 3",
+#       CriteriaLvadSupport == 1 ~ "Non-Dischargeable LVAD after 2 Weeks, Status 3",
+#       CriteriaLvadDiscSupport == 1 ~ "Discretionary 30 Days with LVAD, Status 3",
+#       DeviceRecallException != 1 & Exception == 1 ~ "Exception, Status 3")) %>% 
+#   select(PX_ID, JustId, FormEffectiveDt, FormExpirationDt, FormStatus_descrip, listing_description, Reason_For_Status, IsActiveForm, RequestedCandStatCd)
+# 
+# 
+# status2complications = just_form_hr_stat2 %>% select(PX_ID, JustId, starts_with("Criteria")) %>% 
+#   left_join(just_form_hr %>% select(JustId, Exception, DeviceRecallException, FormEffectiveDt, FormExpirationDt, FormStatus_descrip, listing_description, IsActiveForm, RequestedCandStatCd), by = "JustId") %>% 
+#   # filter(CriteriaMcsdMalfunction == 1 | DeviceRecallException == 1) %>%
+#   mutate(
+#     DeviceRecallException = ifelse(is.na(DeviceRecallException), 0, DeviceRecallException),
+#     Reason_For_Status = case_when(
+#       CriteriaMcsdMalfunction == 1 ~ "Device Malfunction, Status 2",
+#       DeviceRecallException == 1 ~ "Device Recall, Status 2",
+#       CriteriaLvadSupport == 1 ~ "Non-Dischargeable LVAD, Status 2",
+#       CriteriaDurableDevSupport == 1 ~ "TAH/BIVAD/RVAD, Status 2",
+#       CriteriaMcsdEndovasSupp == 1 ~ "PEVAD, Status 2",
+#       CriteriaIabpSupport == 1 ~ "IABP, Status 2",
+#       CriteriaVentEpisode == 1 ~ "Recurrent VT/VF, Status 2",
+#       DeviceRecallException != 1 & Exception == 1 ~ "Exception, Status 2")) %>%
+#   select(PX_ID, JustId, FormEffectiveDt, FormExpirationDt, FormStatus_descrip, listing_description, Reason_For_Status, IsActiveForm, RequestedCandStatCd)
+# 
+# 
+# status1complications = just_form_hr_stat1 %>% select(PX_ID, JustId, starts_with("Criteria")) %>% left_join(just_form_hr %>% select(JustId, Exception, DeviceRecallException, FormEffectiveDt, FormExpirationDt, FormStatus_descrip, listing_description, IsActiveForm, RequestedCandStatCd), by = "JustId") %>%
+#   # filter(CriteriaMcsdSupport == 1 | DeviceRecallException == 1) %>%
+#   mutate(
+#     DeviceRecallException = ifelse(is.na(DeviceRecallException), 0, DeviceRecallException),
+#     Reason_For_Status = case_when(
+#       CriteriaMcsdSupport == 1 ~ "Life Threatening Ventricular Arrhythmia, Status 1",
+#       DeviceRecallException == 1 ~ "Device Recall, Status 1",
+#       CriteriaEcmoSupport == 1 ~ "ECMO, Status 1",
+#       CriteriaBivadSupport == 1 ~ "BIVAD, Status 1",
+#       DeviceRecallException != 1 & Exception == 1 ~ "Exception, Status 1")) %>%
+#   select(PX_ID, JustId, FormEffectiveDt, FormExpirationDt, FormStatus_descrip, listing_description, Reason_For_Status, IsActiveForm, RequestedCandStatCd)
+# 
+# lvadcomplications = rbind(status1complications, status2complications, status3complications, status4complications) 
+# 
+# cand_list2 = cand_list1 %>% left_join(lvadcomplications %>% select(JustId, Reason_For_Status), by = "JustId") %>% group_by(PERS_ID) %>% arrange(CANHX_BEGIN_DT) %>%
+#   mutate(
+#     ComplicationBinaryCode = ifelse(is.na(Reason_For_Status) | Reason_For_Status == "ECMO, Status 1" | Reason_For_Status == "BIVAD, Status 1" | Reason_For_Status == "Exception, Status 1" | Reason_For_Status == "Exception, Status 2" | Reason_For_Status == "Recurrent VT/VF, Status 2" | Reason_For_Status == "IABP, Status 2" | Reason_For_Status == "PEVAD, Status 2" | Reason_For_Status == "TAH/BIVAD/RVAD, Status 2" | Reason_For_Status == "Non-Dischargeable LVAD, Status 2" | Reason_For_Status == "VA ECMO after 7 Days, Status 3" | Reason_For_Status == "Inotropes" | Reason_For_Status == "PEVAD after 2 Weeks, Status 3" | Reason_For_Status == "IABP after 2 Weeks, Status 3" | Reason_For_Status == "LVAD with Life Threatening VA after 7 Days, Status 3" | Reason_For_Status == "Non-Dischargeable LVAD after 2 Weeks, Status 3" | Reason_For_Status == "Discretionary 30 Days with LVAD, Status 3" | Reason_For_Status == "Exception, Status 3" | Reason_For_Status == "LVAD, Status 4" | Reason_For_Status == "Inotropes, Status 4" | Reason_For_Status == "CHD, Status 4" | Reason_For_Status == "Ischemic Heart Disease, Status 4" | Reason_For_Status == "Cardiomyopathy, Status 4" | Reason_For_Status == "Re-Tx, Status 4" | Reason_For_Status == "Exception, Status 4", 0, 1),
+#     index_of_complication = which(ComplicationBinaryCode == 1) [1],
+#     index_of_complication = ifelse(is.na(index_of_complication), 0, index_of_complication),
+#     date_of_complication = if_else(index_of_complication == 0, NA, nth(FormEffectiveDt, first(index_of_complication))),
+#     Outcome = case_when(
+#       !is.na(date_of_complication) ~ 1,
+#       is.na(date_of_complication) & !is.na(REC_TX_DT) ~ 2,
+#       is.na(date_of_complication) & (CAN_REM_CD == 8 | CAN_REM_CD == 13) ~ 3,
+#       TRUE ~ 0))
+# 
+# #Fix this code by making sure that the transplant date falls in between the form effective date and the form expiration date
+# transplants = cand_list2 %>% filter(Outcome == 2) %>% arrange(CANHX_BEGIN_DT) %>% slice_tail(n = 1) 
+# 
+# 
+# #
+# 
+# frequency <- as.data.frame(table(transplants$Reason_For_Status))
+# 
+# # Rename the columns for clarity
+# colnames(frequency) <- c("Reason_For_Status", "Frequency")
+# 
+# # Print the frequency table
+# print(frequency)
+# 
+# # Create a barplot using ggplot2
+# plot1 <- ggplot(frequency, aes(x = Reason_For_Status, y = Frequency)) +
+#   geom_bar(stat = "identity") +
+#   labs(title = "Reasons for Statuses at Transplant", x = "Reason for Status", y = "Frequency") +
+#   theme_classic() +
+#   theme(plot.title = element_text(size = 18),
+#         legend.title = element_blank(),
+#         legend.position = "bottom",
+#         axis.text.x = element_text(size = 18, angle = 45, hjust = 1),
+#         axis.title.x = element_text(size = 20),
+#         axis.text.y = element_text(size = 18),
+#         axis.title.y = element_text(size = 20),
+#         legend.text = element_text(size = 20))
+# 
+# 
+# transplants1 = transplants %>% filter(n() > 1) %>% filter(FormStatus_descrip == "Approved" | FormStatus_descrip == "Completed") %>% arrange(FormEffectiveDt) %>% slice_tail(n = 1)
+# 
+# transplants2 = transplants %>% filter(n() == 1)
+# 
+# transplants = rbind(transplants1, transplants2) %>% left_join(tx_hr24 %>% select(PX_ID, TFL_LAFUDATE, TFL_LASTATUS), by = "PX_ID") %>%
+#   mutate(
+#     STATUS_AT_TX = case_when(
+#       grepl("2110", CANHX_STAT_CD) | grepl("1110", CANHX_STAT_CD) ~ "1",
+#       grepl("2120", CANHX_STAT_CD) | grepl("1120", CANHX_STAT_CD) ~ "2",
+#       grepl("2130", CANHX_STAT_CD) | grepl("1130", CANHX_STAT_CD) ~ "3",
+#       grepl("2140", CANHX_STAT_CD) | grepl("1140", CANHX_STAT_CD) ~ "4"),
+#     BINARY_STATUS = ifelse(STATUS_AT_TX == "4", 1, 0),
+#     POST_TX_DEATH = case_when(
+#       !is.na(death_date) ~ 1,
+#       TRUE ~ 0),
+#     POST_TX_FAILURE = case_when(
+#       TFL_LASTATUS == "R" ~ 1,
+#       TFL_LASTATUS != "R" & !is.na(death_date) ~ 1,
+#       TRUE ~ 0),
+#     TIME_TO_POST_TX_DEATH = case_when(
+#       POST_TX_DEATH == 1 ~ as.numeric(difftime(death_date, REC_TX_DT, units = "days")),
+#       TRUE ~ as.numeric(difftime(TFL_LAFUDATE, REC_TX_DT, units = "days"))),
+#     TIME_TO_POST_TX_DEATH_YRS = TIME_TO_POST_TX_DEATH / 365.25,
+#     TIME_TO_POST_TX_FAILURE = case_when(
+#       TFL_LASTATUS == "R" ~ as.numeric(difftime(TFL_LAFUDATE, REC_TX_DT, units = "days")),
+#       TFL_LASTATUS != "R" & !is.na(death_date) ~ as.numeric(difftime(death_date, REC_TX_DT, units = "days")),
+#       TRUE ~ as.numeric(difftime(TFL_LAFUDATE, REC_TX_DT, units = "days"))),
+#     TIME_TO_POST_TX_FAILURE_YRS = TIME_TO_POST_TX_FAILURE / 365.25)
+# 
+# 
+# km <- Surv(time = transplants$TIME_TO_POST_TX_DEATH_YRS, event = transplants$POST_TX_DEATH)
+# km_fit <- survfit(km ~ BINARY_STATUS, data = transplants) # Example: grouping by 'sex'
+# 
+# plot2 <- ggsurvplot(km_fit, 
+#            pval = TRUE,        # Display p-value (if comparing groups)  # Display risk table
+#            conf.int = FALSE,    # Display confidence intervals
+#            title = "Kaplan-Meier Curve",
+#            xlim = c(0, 3),
+#            xlab = "Time (Years)",
+#            ylab = "Risk of Death")
+# 
+# 
+# 
+# 
+# 
+# 
+# 
+# cand_list2.1 = cand_list2 %>% filter(index_of_complication == 0) %>% slice(1)
+# 
+# cand_list2.2 = cand_list2 %>% filter(index_of_complication != 0) %>% filter(row_number() == index_of_complication)
+# 
+# cand_list2 = rbind(cand_list2.1, cand_list2.2) %>%
+#   mutate(
+#     Outcome = case_when(
+#       !is.na(date_of_complication) ~ 1,
+#       is.na(date_of_complication) & !is.na(REC_TX_DT) ~ 2,
+#       is.na(date_of_complication) & (CAN_REM_CD == 8 | CAN_REM_CD == 13) ~ 3,
+#       TRUE ~ 0),
+#     TIME = case_when(
+#       Outcome == 1 ~ as.numeric(difftime(date_of_complication, durable_lvad_date, units = "days")),
+#       Outcome == 2 ~ as.numeric(difftime(REC_TX_DT, durable_lvad_date, units = "days")),
+#       Outcome == 3 ~ as.numeric(difftime(CAN_REM_DT, durable_lvad_date, units = "days")),
+#       TRUE ~ as.numeric(difftime(CAN_LAST_ACT_STAT_DT, durable_lvad_date, units = "days"))),
+#     TIME = ifelse(TIME < 0, 0, TIME),
+#     TIME_IN_YEARS = TIME / 365.25)
+# 
+# 
+# 
+# 
+# 
+# cand_list2$Outcome <- factor(cand_list2$Outcome,
+#                              levels = c("0", "1", "2", "3"), # Assuming 0 is censored, adjust if different
+#                              labels = c("Censored", "LVAD Complication", "Transplant", "Death or Deterioration"))
+# 
+# options("ggsurvfit.switch-color-linetype" = TRUE)
+# 
+# custom_colors <- c(
+#   `dark red` = "#660000",
+#   `bright red` = "#b81d2e",
+#   `orange` = "#ae6320",
+#   `yellow`= "#b8a370",
+#   `green` = "#3ba9a9",
+#   `white` = "#FFFFFF",
+#   `grey` = "#C3C1C1",
+#   `light green` = "#8dd9d7",
+#   `light yellow` = "#ddd3bb",
+#   `light orange` = "#e49f62",
+#   `space sparkle`= "#496061",
+#   `violet` = "#7A3DE3",
+#   `sandy brown` = "#FA9E4D")
+# 
+# custom_colors <- c("black", "#FA9E4D", "#660000", "violet") 
+# 
+# 
+# cif_plot <- survfit2(Surv(TIME_IN_YEARS, Outcome) ~ 1, data = cand_list2) %>%
+#   ggcuminc(
+#     outcome = c("LVAD Complication", "Transplant", "Death or Deterioration"),
+#     linewidth = 1) + 
+#   add_confidence_interval(alpha = 0.5) +
+#   add_risktable(size = 7, theme = theme_risktable_default(plot.title.size = 18, axis.text.y.size = 18)) +
+#   coord_cartesian(xlim = c(0, 5)) +
+#   #scale_x_continuous(breaks = c(0, 2, 4, 6, 8, 10)) +
+#   scale_y_continuous(
+#     limits = c(0, 1),
+#     labels = scales::percent, 
+#     expand = c(0.01, 0)
+#   ) +
+#   xlab("Years after Obtaining Durable LVAD") +
+#   theme_classic() +
+#   #guides(linetype=guide_legend(nrow = 1, byrow=TRUE)) +
+#   #guides(color = guide_legend(nrow = 1, byrow=TRUE)) +
+#   scale_color_manual(values = c('black', 'darkred', '#FA9E4D')) +
+#   scale_fill_manual(values = c('#54738E', '#82AC7C', 'violet')) +
+#   theme(plot.title = element_text(size = 18),
+#         legend.title = element_blank(),
+#         legend.position = "bottom",
+#         axis.text.x = element_text(size = 18),
+#         axis.title.x = element_text(size = 20),
+#         axis.text.y = element_text(size = 18),
+#         axis.title.y = element_text(size = 20),
+#         legend.text = element_text(size = 20))
+# 
+# 
+# 
+# cifresults <- cuminc(Surv(TIME, Outcome) ~ 1, data = cand_list2)
+# 
+# print(cifresults)
+# 
+# plot3 <- ggplot(cand_list2, aes(x = "", y = TIME)) +
+#   geom_boxplot(fill = "lightblue") +
+#   labs(title = "Time in Days from Durable LVAD Implantation to Complication", y = "") +
+#   theme_minimal()
+# 
+# 
+
+```
+
+
+``` {r full data}
+
+# thor_support_device = ThorSupportDevice %>%
+#   mutate(ChangeDt = as.Date(ChangeDate)) %>%
+#   left_join(just_form_hr %>% select(ThorSupportDevicePrimary, PX_ID),
+#             by = c("DeviceId" = "ThorSupportDevicePrimary")) %>%
+#   select(-DeviceId) %>%
+#   distinct(.keep_all = TRUE)
+# 
+lvad_keywords = c("Heartmate II", "hm", "lionheart", "arrow", "jarvik", "micromed", "debakey", "novacor", "evaheart", "worldheart", "levacor", "reliantheart", "hvad", "heartsaver")
+
+lvads = thoracic_mcs_device %>% select(WL_ID_CODE, DEVICE_TYPE, LVAD_BRAND, VAD_BRAND, VENTRICULAR_SUPPORT, IMPLANT_DATE, EXPLANT_DATE, INPLACE, MCS_REM_REASON) %>%
+  filter(DEVICE_TYPE == "Dischargeable VAD" | (DEVICE_TYPE == "LVAD" & grepl(paste(lvad_keywords, collapse = "|"), LVAD_BRAND, ignore.case = TRUE)))
+
+
+
+cand_list = thoracic_data %>% select(PT_CODE, WL_ID_CODE, INIT_DATE, INIT_STAT, COMPOSITE_DEATH_DATE, INIT_AGE, WL_ORG, END_DATE, REM_CD, CTR_CODE, END_STAT) %>% 
+  filter(INIT_AGE > 18) %>% filter(WL_ORG == "HR") %>% 
+  filter(INIT_DATE >= mdy("10-18-2018") & INIT_DATE <= mdy("01-31-2025")) %>%
+  mutate(
+    initial_status = case_when(
+      grepl("2110", INIT_STAT) | grepl("1110", INIT_STAT) ~ "1",
+      grepl("2120", INIT_STAT) | grepl("1120", INIT_STAT) ~ "2",
+      grepl("2130", INIT_STAT) | grepl("1130", INIT_STAT) ~ "3",
+      grepl("2140", INIT_STAT) | grepl("1140", INIT_STAT) ~ "4",
+      grepl("2150", INIT_STAT) | grepl("1150", INIT_STAT) ~ "5",
+      grepl("2160", INIT_STAT) | grepl("1160", INIT_STAT) ~ "6",
+      grepl("2999", INIT_STAT) | grepl("1999", INIT_STAT) ~ "Inactive"),
+    TX_DATE = ifelse(REM_CD == 4, END_DATE, NA),
+    TX_DATE = as.Date(TX_DATE, origin = "1970-01-01")) %>% 
+  filter(initial_status == "1" | initial_status == "2" | initial_status == "3") 
+
+
+#split data into single and multiple registrations
+single_registrations = cand_list %>% 
+  group_by(PT_CODE) %>%
+  filter(n() == 1)
+
+multiple_registrations = cand_list %>%
+  group_by(PT_CODE) %>%
+  filter(n() > 1)
+
+
+#distinguish type of multiple registration (concurrents must be collapsed into single listing)
+multiple_registrations = multiple_registrations %>% arrange(INIT_DATE) %>%
+  mutate(list_type = case_when(
+    INIT_DATE < lag(END_DATE) ~ "concurrent",
+    END_DATE > lead(INIT_DATE) ~ "concurrent",
+    TRUE ~ "sequential")) 
+
+multiple_registrations = multiple_registrations[order(multiple_registrations$PT_CODE, multiple_registrations$END_DATE), ]
+
+ 
+multiple_registrations$transplant_num <- 1 
+for (i in 2:nrow(multiple_registrations)) {
+  if (!is.na(multiple_registrations$PT_CODE[i-1]) && 
+      !is.na(multiple_registrations$PT_CODE[i]) && 
+      !is.na(multiple_registrations$TX_DATE[i-1]) && 
+      !is.na(multiple_registrations$TX_DATE[i]) &&
+      multiple_registrations$PT_CODE[i-1] == multiple_registrations$PT_CODE[i] &&
+      multiple_registrations$TX_DATE[i-1] != multiple_registrations$TX_DATE[i]) {
+    
+    multiple_registrations$transplant_num[i] = multiple_registrations$transplant_num[i-1] + 1
+  }
+}
+
+for (i in 2:nrow(multiple_registrations)) {
+  if (!is.na(multiple_registrations$PT_CODE[i-1]) && 
+      !is.na(multiple_registrations$PT_CODE[i]) && 
+      multiple_registrations$PT_CODE[i-1] == multiple_registrations$PT_CODE[i] &&
+      !is.na(multiple_registrations$transplant_num[i-1]) && 
+      multiple_registrations$transplant_num[i-1] != multiple_registrations$transplant_num[i] &&
+      multiple_registrations$transplant_num[i-1] != 1) {
+    
+    multiple_registrations$transplant_num[i] = multiple_registrations$transplant_num[i-1]
+  }
+}
+
+multiple_registrations$transplant_num[multiple_registrations$list_type == 'sequential'] <- 0 
+
+for(i in 1:(nrow(multiple_registrations)-1)) { 
+  if(multiple_registrations$PT_CODE[i] == multiple_registrations$PT_CODE[i+1] &
+     multiple_registrations$list_type[i] == 'concurrent' & multiple_registrations$list_type[i+1] == 'concurrent' &
+     !is.na(multiple_registrations$TX_DATE[i]) & !is.na(multiple_registrations$TX_DATE[i+1]) &
+     multiple_registrations$TX_DATE[i] < multiple_registrations$TX_DATE[i+1] ) {
+    
+    multiple_registrations$TX_DATE[i] <- multiple_registrations$TX_DATE[i+1] ##if PERS_ID is the same as the NEXT row, both have concurrent listings, transplant dates for both are not NA, and transplant date is earlier than the next row's transplant date - update to next row's transplant date
+  }}
+
+
+sequential_lists <- multiple_registrations %>%
+  filter(list_type == "sequential") %>%
+  mutate(min_list_date = INIT_DATE)  
+
+multiple_registrations <- multiple_registrations %>% 
+  group_by(PT_CODE, transplant_num) %>%
+  mutate(min_list_date = min(INIT_DATE, na.rm=T))
+
+multiple_registrations <- multiple_registrations %>% mutate
+max_retransplants <- max(multiple_registrations$transplant_num) 
+
+collapsed_concurrent_registrations <- NULL 
+for(i in 1:max_retransplants) {
+  collapsed_concurrent_registrations <- rbind(collapsed_concurrent_registrations, 
+        
+  multiple_registrations %>%
+    filter(list_type == "concurrent" & transplant_num == i) %>% 
+    mutate(last_wait_date = max(END_DATE, na.rm = TRUE)) %>% 
+    fill(TX_DATE, .direction = "up") %>%
+    fill(REM_CD, .direction = "up") %>%
+    select(-c(END_DATE, INIT_DATE)) %>%
+    filter(row_number() == 1) %>%  
+    mutate(last_wait_date = case_when(
+      TX_DATE < last_wait_date ~ TX_DATE,
+      TRUE ~ last_wait_date)))}
+
+##recombine separated data frames
+
+#recombined data
+cand_list <- bind_rows(single_registrations %>% ungroup(), 
+                       sequential_lists %>% ungroup(), 
+                       collapsed_concurrent_registrations %>% ungroup()) 
+
+#fix listing date 
+cand_list = cand_list %>% 
+  mutate(
+    min_list_date = if_else(is.na(min_list_date), as.Date(INIT_DATE), as.Date(min_list_date)))
+
+
+cand_hx_list = cand_list %>% 
+  mutate(INIT_DATE = ifelse(is.na(INIT_DATE), min_list_date, INIT_DATE),
+         END_DATE = ifelse(is.na(END_DATE), last_wait_date, END_DATE),
+         INIT_DATE = as.Date(INIT_DATE, origin = "1970-01-01"),
+         END_DATE = as.Date(END_DATE, origin = "1970-01-01")) %>%
+  select(-list_type, -transplant_num, -min_list_date, -last_wait_date) %>% 
+  left_join(thoracic_wlhistory_data %>% select(WL_ID_CODE, CHG_DATE, CHG_TY, UNOS_CAND_STAT_CD), by = "WL_ID_CODE") %>%
+  group_by(WL_ID_CODE) %>% arrange(CHG_DATE) %>%
+  mutate(
+    UNOS_CAND_STAT_CD = ifelse(UNOS_CAND_STAT_CD == 2999 | UNOS_CAND_STAT_CD == 1999, lag(UNOS_CAND_STAT_CD), UNOS_CAND_STAT_CD),
+    UNOS_CAND_STAT_CD = case_when(
+      grepl("2110", UNOS_CAND_STAT_CD) | grepl("1110", UNOS_CAND_STAT_CD) ~ 1,
+      grepl("2120", UNOS_CAND_STAT_CD) | grepl("1120", UNOS_CAND_STAT_CD) ~ 2,
+      grepl("2130", UNOS_CAND_STAT_CD) | grepl("1130", UNOS_CAND_STAT_CD) ~ 3,
+      grepl("2140", UNOS_CAND_STAT_CD) | grepl("1140", UNOS_CAND_STAT_CD) ~ 4,
+      grepl("2150", UNOS_CAND_STAT_CD) | grepl("1150", UNOS_CAND_STAT_CD) ~ 5,
+      grepl("2160", UNOS_CAND_STAT_CD) | grepl("1160", UNOS_CAND_STAT_CD) ~ 6),
+    initial_status = as.double(initial_status),
+    index_of_status_change = which(UNOS_CAND_STAT_CD < initial_status) [1])
+ 
+
+
+
+cand_hx_list1 = cand_hx_list %>% filter(is.na(index_of_status_change)) %>% mutate(CANHX_END_DT = last(CHG_DATE)) %>% slice(1)
+ 
+cand_hx_list2 = cand_hx_list %>% filter(!is.na(index_of_status_change)) %>% filter(row_number() <= index_of_status_change) %>%
+  mutate(CANHX_END_DT = last(CHG_DATE) - 1) %>% slice(1)
+ 
+cand_hx_list = rbind(cand_hx_list1, cand_hx_list2) %>% select(-index_of_status_change, -UNOS_CAND_STAT_CD, -CHG_TY)
+   
+
+
+
+cand_hx_list = cand_hx_list %>% 
+  mutate(
+    CANHX_END_DT = ifelse(CANHX_END_DT > END_DATE, END_DATE, CANHX_END_DT),
+    CANHX_END_DT = as.Date(CANHX_END_DT, origin = "1970-01-01"),
+    OUTCOME = case_when(
+      REM_CD == 4 & CANHX_END_DT == END_DATE ~ 1,
+      (REM_CD == 13 | REM_CD == 8) & CANHX_END_DT == END_DATE ~ 2,
+      TRUE ~ 0),
+    TIME = case_when(
+      OUTCOME == 1 ~ as.numeric(difftime(TX_DATE, INIT_DATE, units = "days")),
+      OUTCOME == 2 ~ as.numeric(difftime(END_DATE, INIT_DATE, units = "days")),
+      OUTCOME == 0 ~ as.numeric(difftime(CANHX_END_DT, INIT_DATE, units = "days")))) %>% 
+  left_join(lvads) %>% group_by(WL_ID_CODE) %>% 
+  arrange(IMPLANT_DATE) %>% slice(1) %>%
+  mutate(lvad = ifelse(!is.na(IMPLANT_DATE), 1, 0)) %>% filter(lvad == 0)
+
+# 
+# cand_hx_list$OUTCOME <- factor(cand_hx_list$OUTCOME,
+#                                levels = c("0", "1", "2"), # Assuming 0 is censored, adjust if different
+#                                labels = c("Censored", "Transplant", "Death or Deterioration"))
+# 
+# options("ggsurvfit.switch-color-linetype" = TRUE)
+# 
+# custom_colors <- c(
+#   `dark red` = "#660000",
+#   `bright red` = "#b81d2e",
+#   `orange` = "#ae6320",
+#   `yellow`= "#b8a370",
+#   `green` = "#3ba9a9",
+#   `white` = "#FFFFFF",
+#   `grey` = "#C3C1C1",
+#   `light green` = "#8dd9d7",
+#   `light yellow` = "#ddd3bb",
+#   `light orange` = "#e49f62",
+#   `space sparkle`= "#496061",
+#   `violet` = "#7A3DE3",
+#   `sandy brown` = "#FA9E4D")
+# 
+# custom_colors <- c("black", "#FA9E4D", "#660000") 
+# 
+# 
+# cif_plot <- survfit2(Surv(TIME, OUTCOME) ~ initial_status, data = cand_hx_list) %>%
+#   ggcuminc(
+#     outcome = c("Death or Deterioration"),
+#     linewidth = 1) + 
+#   #add_confidence_interval(alpha = 0.5) +
+#   add_risktable(size = 7, theme = theme_risktable_default(plot.title.size = 18, axis.text.y.size = 18)) +
+#   coord_cartesian(xlim = c(0, 2000)) +
+#   scale_x_continuous(breaks = c(0, 500, 1000, 1500, 2000)) +
+#   scale_y_continuous(
+#     limits = c(0, 0.3),
+#     labels = scales::percent, 
+#     expand = c(0.01, 0)
+#   ) +
+#   xlab("Days after Listing") +
+#   theme_classic() +
+#   #guides(linetype=guide_legend(nrow = 1, byrow=TRUE)) +
+#   #guides(color = guide_legend(nrow = 1, byrow=TRUE)) +
+#   scale_color_manual(values = c('black', 'darkred', '#FA9E4D')) +
+#   scale_fill_manual(values = c('#54738E', '#82AC7C', 'violet')) +
+#   theme(plot.title = element_text(size = 18),
+#         legend.title = element_blank(),
+#         legend.position = "bottom",
+#         axis.text.x = element_text(size = 18),
+#         axis.title.x = element_text(size = 20),
+#         axis.text.y = element_text(size = 18),
+#         axis.title.y = element_text(size = 20),
+#         legend.text = element_text(size = 20))
+# 
+# 
+
+
+
+
+```
+
+
+
+
+
+```{r sensitivity}
+
+# cand_list <- bind_rows(single_registrations %>% ungroup(), 
+#                        sequential_lists %>% ungroup(), 
+#                        collapsed_concurrent_registrations %>% ungroup()) 
+# 
+# #fix listing date 
+# cand_list = cand_list %>% 
+#   mutate(
+#     min_list_date = if_else(is.na(min_list_date), as.Date(CAN_LISTING_DT), as.Date(min_list_date)))
+# 
+# 
+# cand_hx_list = cand_list %>%
+#   mutate(
+#     OUTCOME = case_when(
+#       !is.na(REC_TX_DT) ~ 1,
+#       CAN_REM_CD == 13 | CAN_REM_CD == 8 ~ 2,
+#       TRUE ~ 0),
+#     TIME = case_when(
+#       OUTCOME == 1 ~ as.numeric(difftime(REC_TX_DT, min_list_date, units = "days")),
+#       OUTCOME == 2 ~ as.numeric(difftime(CAN_REM_DT, min_list_date, units = "days")),
+#       TRUE ~ as.numeric(difftime(CAN_REM_DT, min_list_date, units = "days"))))
+# 
+# 
+# cand_hx_list$OUTCOME <- factor(cand_hx_list$OUTCOME,
+#                                levels = c("0", "1", "2"), # Assuming 0 is censored, adjust if different
+#                                labels = c("Censored", "Transplant", "Death or Deterioration"))
+# 
+# options("ggsurvfit.switch-color-linetype" = TRUE)
+# 
+# custom_colors <- c(
+#   `dark red` = "#660000",
+#   `bright red` = "#b81d2e",
+#   `orange` = "#ae6320",
+#   `yellow`= "#b8a370",
+#   `green` = "#3ba9a9",
+#   `white` = "#FFFFFF",
+#   `grey` = "#C3C1C1",
+#   `light green` = "#8dd9d7",
+#   `light yellow` = "#ddd3bb",
+#   `light orange` = "#e49f62",
+#   `space sparkle`= "#496061",
+#   `violet` = "#7A3DE3",
+#   `sandy brown` = "#FA9E4D")
+# 
+# custom_colors <- c("black", "#FA9E4D", "#660000") 
+# 
+# 
+# cif_plot <- survfit2(Surv(TIME, OUTCOME) ~ initial_status, data = cand_hx_list) %>%
+#   ggcuminc(
+#     outcome = c("Death or Deterioration"),
+#     linewidth = 1) + 
+#   add_confidence_interval(alpha = 0.5) +
+#   add_risktable(size = 7, theme = theme_risktable_default(plot.title.size = 18, axis.text.y.size = 18)) +
+#   coord_cartesian(xlim = c(0, 180)) +
+#   scale_x_continuous(breaks = c(0, 45, 90, 135, 180)) +
+#   scale_y_continuous(
+#     limits = c(0, 0.2),
+#     labels = scales::percent, 
+#     expand = c(0.01, 0)
+#   ) +
+#   xlab("Days after Listing") +
+#   theme_classic() +
+#   #guides(linetype=guide_legend(nrow = 1, byrow=TRUE)) +
+#   #guides(color = guide_legend(nrow = 1, byrow=TRUE)) +
+#   scale_color_manual(values = c('black', 'darkred', '#FA9E4D')) +
+#   scale_fill_manual(values = c('#54738E', '#82AC7C', 'violet')) +
+#   theme(plot.title = element_text(size = 18),
+#         legend.title = element_blank(),
+#         legend.position = "bottom",
+#         axis.text.x = element_text(size = 18),
+#         axis.title.x = element_text(size = 20),
+#         axis.text.y = element_text(size = 18),
+#         axis.title.y = element_text(size = 20),
+#         legend.text = element_text(size = 20))
+# 
+
+lvad_list = thoracic_data %>% select(PT_CODE, WL_ID_CODE, INIT_DATE, INIT_STAT, COMPOSITE_DEATH_DATE, INIT_AGE, WL_ORG, END_DATE, REM_CD, CTR_CODE, END_STAT) %>% 
+  filter(INIT_AGE > 18) %>% filter(WL_ORG == "HR") %>% 
+  filter(INIT_DATE >= mdy("10-18-2018") & INIT_DATE <= mdy("01-31-2025")) %>%
+  mutate(
+    TX_DATE = ifelse(REM_CD == 4, END_DATE, NA),
+    TX_DATE = as.Date(TX_DATE, origin = "1970-01-01"))
+
+#merge with candidate list
+lvad_list = lvad_list %>% left_join(lvads) %>% rename("durable_lvad_date" = "IMPLANT_DATE") %>%
+  filter(duplicated(PT_CODE) == FALSE)
+
+discretionary_time = thoracic_stat3 %>% select(WL_ID_CODE, UNOS_CAND_STAT_CD, CRITERIALVADDISCSUPPORT, FORMEFFECTIVEDT) %>% 
+  filter(CRITERIALVADDISCSUPPORT == 1)
+
+lvad_hx_list_episodes = lvad_list %>% filter(durable_lvad_date >= mdy("10-18-2018") & durable_lvad_date <= mdy("01-31-2025")) %>% 
+  mutate(
+    VAD_BRAND = ifelse(VAD_BRAND == "", LVAD_BRAND, VAD_BRAND),
+    INPLACE = ifelse(INPLACE == 0 & MCS_REM_REASON == "Transplanted", 1, INPLACE)) %>%
+  left_join(thoracic_wlhistory_data %>% select(WL_ID_CODE, CHG_DATE, CHG_TY, UNOS_CAND_STAT_CD)) %>% filter(CHG_DATE >= durable_lvad_date) %>%
+  left_join(discretionary_time, by = "WL_ID_CODE")
+
+lvad_hx_list_episodes1 = lvad_hx_list_episodes %>% group_by(WL_ID_CODE, CHG_DATE) %>% arrange(CHG_DATE) %>%
+  filter(all(is.na(CRITERIALVADDISCSUPPORT)))
+
+lvad_hx_list_episodes2 = lvad_hx_list_episodes %>% group_by(WL_ID_CODE, CHG_DATE) %>% arrange(CHG_DATE) %>%
+  filter(any(CRITERIALVADDISCSUPPORT == 1)) %>% filter(UNOS_CAND_STAT_CD.x == UNOS_CAND_STAT_CD.y & CHG_DATE == FORMEFFECTIVEDT)
+
+lvad_hx_list_episodes3 = lvad_hx_list_episodes %>% group_by(WL_ID_CODE, CHG_DATE) %>% arrange(CHG_DATE) %>%
+  filter(any(CRITERIALVADDISCSUPPORT == 1)) %>% filter(UNOS_CAND_STAT_CD.x != UNOS_CAND_STAT_CD.y | CHG_DATE != FORMEFFECTIVEDT) %>% slice(1)
+
+lvad_hx_list_episodes = rbind(lvad_hx_list_episodes1, lvad_hx_list_episodes2, lvad_hx_list_episodes3) %>% ungroup() %>% 
+  select(-UNOS_CAND_STAT_CD.y, -FORMEFFECTIVEDT) %>% rename(UNOS_CAND_STAT_CD = UNOS_CAND_STAT_CD.x) %>%
+  group_by(WL_ID_CODE) %>% arrange(CHG_DATE) %>% filter(row_number() > 1) %>%
+  mutate(
+    STATUS_CD = ifelse(UNOS_CAND_STAT_CD == 2999 | UNOS_CAND_STAT_CD == 1999, lag(UNOS_CAND_STAT_CD), UNOS_CAND_STAT_CD),
+    STATUS_CD = case_when(
+      grepl("2110", UNOS_CAND_STAT_CD) | grepl("1110", UNOS_CAND_STAT_CD) ~ 1,
+      grepl("2120", UNOS_CAND_STAT_CD) | grepl("1120", UNOS_CAND_STAT_CD) ~ 2,
+      grepl("2130", UNOS_CAND_STAT_CD) | grepl("1130", UNOS_CAND_STAT_CD) ~ 3,
+      grepl("2140", UNOS_CAND_STAT_CD) | grepl("1140", UNOS_CAND_STAT_CD) ~ 4,
+      grepl("2150", UNOS_CAND_STAT_CD) | grepl("1150", UNOS_CAND_STAT_CD) ~ 5,
+      grepl("2160", UNOS_CAND_STAT_CD) | grepl("1160", UNOS_CAND_STAT_CD) ~ 6,
+      TRUE ~ NA),
+    index_of_status_change = which(STATUS_CD == 1 | STATUS_CD == 2 | (STATUS_CD == 3 & is.na(CRITERIALVADDISCSUPPORT))) [1])
+ 
+lvad_hx_list1 = lvad_hx_list_episodes %>% filter(is.na(index_of_status_change)) %>% mutate(CANHX_END_DT = last(CHG_DATE)) %>% slice(1)
+ 
+lvad_hx_list2 = lvad_hx_list_episodes %>% filter(!is.na(index_of_status_change)) %>% filter(row_number() <= index_of_status_change) %>%
+  mutate(CANHX_END_DT = last(CHG_DATE) - 1) %>% slice(1)
+ 
+lvad_hx_list = rbind(lvad_hx_list1, lvad_hx_list2) %>% select(-index_of_status_change, -STATUS_CD, -CHG_TY) %>%
+  mutate(
+    CANHX_END_DT = ifelse(CANHX_END_DT > END_DATE, END_DATE, CANHX_END_DT),
+    CANHX_END_DT = as.Date(CANHX_END_DT, origin = "1970-01-01"),
+    OUTCOME = case_when(
+      REM_CD == 4 & CANHX_END_DT == END_DATE & (is.na(EXPLANT_DATE) | EXPLANT_DATE >= CANHX_END_DT) ~ 1,
+      (REM_CD == 13 | REM_CD == 8) & CANHX_END_DT == END_DATE & (is.na(EXPLANT_DATE) | EXPLANT_DATE >= CANHX_END_DT) ~ 2,
+      TRUE ~ 0),
+    TIME = case_when(
+      OUTCOME == 1 ~ as.numeric(difftime(TX_DATE, durable_lvad_date, units = "days")),
+      OUTCOME == 2 ~ as.numeric(difftime(END_DATE, durable_lvad_date, units = "days")),
+      OUTCOME == 0 & (!is.na(EXPLANT_DATE) & EXPLANT_DATE < CANHX_END_DT) ~ as.numeric(difftime(EXPLANT_DATE, durable_lvad_date, units = "days")),
+      TRUE ~ as.numeric(difftime(CANHX_END_DT, durable_lvad_date, units = "days"))),
+    initial_status = "Durable LVAD") %>% select(WL_ID_CODE, initial_status, OUTCOME, TIME, durable_lvad_date, VAD_BRAND)
+
+
+cand_hx_list = cand_hx_list %>% select(WL_ID_CODE, initial_status, OUTCOME, TIME) %>% mutate(initial_status = as.character(initial_status))
+
+cand_hx_lvad_list = rbind(cand_hx_list, lvad_hx_list) %>% mutate(TIME_IN_YEARS = TIME / 365.25) 
+
+
+cand_hx_lvad_list$OUTCOME <- factor(cand_hx_lvad_list$OUTCOME,
+                                    levels = c("0", "1", "2"), # Assuming 0 is censored, adjust if different
+                                    labels = c("Censored", "Transplant", "Death or Deterioration")) 
+
+
+
+options("ggsurvfit.switch-color-linetype" = FALSE)
+
+custom_colors <- c(
+  `dark red` = "#660000",
+  `bright red` = "#b81d2e",
+  `orange` = "#ae6320",
+  `yellow`= "#b8a370",
+  `green` = "#3ba9a9",
+  `white` = "#FFFFFF",
+  `grey` = "#C3C1C1",
+  `light green` = "#8dd9d7",
+  `light yellow` = "#ddd3bb",
+  `light orange` = "#e49f62",
+  `space sparkle`= "#496061",
+  `violet` = "#7A3DE3",
+  `sandy brown` = "#FA9E4D")
+
+custom_colors <- c("black", "#FA9E4D", "#660000", "#496061") 
+
+
+cif_plot <- survfit2(Surv(TIME_IN_YEARS, OUTCOME) ~ initial_status, data = cand_hx_lvad_list) %>%
+  ggcuminc(
+    outcome = c("Death or Deterioration"),
+    linewidth = 1) + 
+  add_confidence_interval(alpha = 0.25) +
+  add_risktable(size = 7, theme = theme_risktable_default(plot.title.size = 18, axis.text.y.size = 18)) +
+  coord_cartesian(xlim = c(0, 5)) +
+  #scale_x_continuous(breaks = c(0, 45, 90, 135, 180)) +
+  scale_y_continuous(
+    limits = c(0, 0.2),
+    labels = scales::percent, 
+    expand = c(0.01, 0)
+  ) +
+  xlab("Years after LVAD Implantation") +
+  theme_classic() +
+  #guides(linetype=guide_legend(nrow = 1, byrow=TRUE)) +
+  #guides(color = guide_legend(nrow = 1, byrow=TRUE)) +
+  scale_color_manual(values = c('black', 'darkred', '#FA9E4D', "#496061")) +
+  scale_fill_manual(values = c('#54738E', '#82AC7C', 'violet', "#8dd9d7")) +
+  theme(plot.title = element_text(size = 18),
+        legend.title = element_blank(),
+        legend.position = "bottom",
+        axis.text.x = element_text(size = 18),
+        axis.title.x = element_text(size = 20),
+        axis.text.y = element_text(size = 18),
+        axis.title.y = element_text(size = 20),
+        legend.text = element_text(size = 20))
+
+
+cifresults1 <- cuminc(Surv(TIME_IN_YEARS, OUTCOME) ~ initial_status, data = as.data.frame(cand_hx_lvad_list)) %>%
+  tbl_cuminc(
+    times = 5,
+    outcomes = c("Transplant", "Death or Deterioration"),
+    estimate_fun = gtsummary::label_style_number(scale = 100, digits = 10))
+
+cifresults2 <- cuminc(Surv(TIME_IN_YEARS, OUTCOME) ~ initial_status, data = as.data.frame(cand_hx_lvad_list)) %>%
+  tbl_cuminc(
+    times = 1.5,
+    outcomes = c("Transplant", "Death or Deterioration"),
+    estimate_fun = gtsummary::label_style_number(scale = 100, digits = 10))
+
+
+
+status3asymptote <- inline_text(cifresults2, time = 1.5, outcome = "Death or Deterioration", level = "3") %>% substr(1, 12) 
+status3asymptote <- as.double(status3asymptote) / 100
+
+status2asymptote <- inline_text(cifresults2, time = 1.5, outcome = "Death or Deterioration", level = "2") %>% substr(1, 12) 
+status2asymptote <- as.double(status2asymptote) / 100
+
+status1asymptote <- inline_text(cifresults1, time = 5, outcome = "Death or Deterioration", level = "1") %>% substr(1, 12) 
+status1asymptote <- as.double(status1asymptote) / 100
+
+lvads_only = cand_hx_lvad_list %>% filter(initial_status == "Durable LVAD")
+
+cifresults_lvads <- cuminc(Surv(TIME_IN_YEARS, OUTCOME) ~ 1, data = as.data.frame(lvads_only))
+
+
+ci_data <- data.frame(time = cifresults_lvads[["cmprsk"]][["1 2"]][["time"]], est = cifresults_lvads[["cmprsk"]][["1 2"]][["est"]])
+
+# Find the time at which the cumulative incidence meets the specified rate
+time_at_status3_death <- ci_data$time[which.min(abs(ci_data$est - status3asymptote))]
+time_at_status2_death <- ci_data$time[which.min(abs(ci_data$est - status2asymptote))]
+time_at_status1_death <- ci_data$time[which.min(abs(ci_data$est - status1asymptote))]
+
+print(time_at_status3_death)
+print(time_at_status2_death)
+print(time_at_status1_death)
+
+
+cif_plot_asymptotes <- survfit2(Surv(TIME_IN_YEARS, OUTCOME) ~ 1, data = lvads_only) %>%
+  ggcuminc(
+    outcome = c("Death or Deterioration"),
+    linewidth = 1) + 
+  add_confidence_interval(alpha = 0.25) +
+  add_risktable(size = 7, theme = theme_risktable_default(plot.title.size = 18, axis.text.y.size = 18)) +
+  coord_cartesian(xlim = c(0, 5)) +
+  #scale_x_continuous(breaks = c(0, 45, 90, 135, 180)) +
+  scale_y_continuous(
+    limits = c(0, 0.20),
+    labels = scales::percent, 
+    expand = c(0.01, 0)
+  ) +
+  geom_hline(yintercept = status1asymptote, linetype = 5, color = "green", linewidth = 1) +
+  geom_hline(yintercept = status2asymptote, linetype = 5, color = "red", linewidth = 1) +
+  geom_hline(yintercept = status3asymptote, linetype = 5, color = "blue", linewidth = 1) +
+  geom_segment(aes(x = time_at_status1_death, y = 0, yend = status1asymptote), color = "black", linetype = "dotted", linewidth = 1) +
+  geom_segment(aes(x = time_at_status2_death, y = 0, yend = status2asymptote), color = "black", linetype = "dotted", linewidth = 1) +
+  geom_segment(aes(x = time_at_status3_death, y = 0, yend = status3asymptote), color = "black", linetype = "dotted", linewidth = 1) +
+  xlab("Years after LVAD Implantation") +
+  ylab("Cumulative Incidence of Waitlist Removal for\nDeath or Clinical Deterioration") +
+  theme_classic() +
+  #guides(linetype=guide_legend(nrow = 1, byrow=TRUE)) +
+  #guides(color = guide_legend(nrow = 1, byrow=TRUE)) +
+  scale_color_manual(values = c('black', 'darkred', '#FA9E4D', "#496061")) +
+  scale_fill_manual(values = c('#54738E', '#82AC7C', 'violet', "#8dd9d7")) +
+  theme(plot.title = element_text(size = 18),
+        legend.title = element_blank(),
+        legend.position = "bottom",
+        axis.text.x = element_text(size = 18),
+        axis.title.x = element_text(size = 20),
+        axis.text.y = element_text(size = 18),
+        axis.title.y = element_text(size = 20),
+        legend.text = element_text(size = 20))
+
+
+# stat1 = thoracic_stat1 %>% select(WL_ID_CODE, WLREG_AUDIT_ID_CODE, UNOS_CAND_STAT_CD, UNOS_CAND_STAT_DT, FORMEFFECTIVEDT, FORMSTATUS) %>%
+#   mutate(STATUS = 1)
+# stat2 = thoracic_stat2 %>% select(WL_ID_CODE, WLREG_AUDIT_ID_CODE, UNOS_CAND_STAT_CD, UNOS_CAND_STAT_DT, FORMEFFECTIVEDT, FORMSTATUS) %>%
+#   mutate(STATUS = 2)
+# stat3 = thoracic_stat3 %>% select(WL_ID_CODE, WLREG_AUDIT_ID_CODE, UNOS_CAND_STAT_CD, UNOS_CAND_STAT_DT, FORMEFFECTIVEDT, FORMSTATUS) %>% 
+#   mutate(STATUS = 3)
+# stat4 = thoracic_stat4 %>% select(WL_ID_CODE, WLREG_AUDIT_ID_CODE, UNOS_CAND_STAT_CD, UNOS_CAND_STAT_DT, FORMEFFECTIVEDT, FORMSTATUS) %>%
+#   mutate(STATUS = 4)
+# 
+# just_form_hr = rbind(stat1, stat2, stat3, stat4) %>% rename(RequestedCandStatCd = UNOS_CAND_STAT_CD) %>% 
+#   mutate(UniqueID = row_number())
+
+
+status3complications = thoracic_stat3 %>% 
+  select(WL_ID_CODE, WLREG_AUDIT_ID_CODE, DEVICERECALLEXCEPTION, EXCEPTION, starts_with("CRITERIA"), 
+         UNOS_CAND_STAT_CD, UNOS_CAND_STAT_DT, FORMEFFECTIVEDT, FORMSTATUS) %>%
+  # filter(CriteriaMcsdWithHemo == 1 | CriteriaMcsdWithPump == 1 | CriteriaMcsdWithRhf == 1 | CriteriaMcsdInfection == 1 |  CriteriaMcsdMucosalBleed == 1 | CriteriaMcsdWithAI == 1 | DeviceRecallException == 1) %>%
+  mutate(
+    DEVICERECALLEXCEPTION = ifelse(is.na(DEVICERECALLEXCEPTION), 0, DEVICERECALLEXCEPTION),
+    Reason_For_Status = case_when(
+      CRITERIAMCSDWITHHEMO == 1 ~ "Hemolysis, Status 3",
+      CRITERIAMCSDWITHPUMP == 1 ~ "Pump Thrombosis, Status 3",
+      CRITERIAMCSDWITHRHF == 1 ~ "Right Heart Failure, Status 3",
+      CRITERIAMCSDINFECTION == 1 ~ "Device Infection, Status 3",
+      CRITERIAMCSDMUCOSALBLEED == 1 ~ "Mucosal Bleeding, Status 3",
+      CRITERIAMCSDWITHAI == 1 ~ "Aortic Insufficiency, Status 3",
+      DEVICERECALLEXCEPTION == 1 ~ "Device Recall, Status 3",
+      CRITERIAVAECMOSUPPORT == 1 ~ "VA ECMO after 7 Days, Status 3",
+      CRITERIAINOTROPESUPPORT == 1 ~ "Inotropes, Status 3",
+      CRITERIAPERCUSUPPORT == 1 ~ "PEVAD after 2 Weeks, Status 3",
+      CRITERIAIABPSUPPORT == 1 ~ "IABP after 2 Weeks, Status 3",
+      CRITERIAMCSDSUPPORT == 1 ~ "LVAD with Life Threatening VA after 7 Days, Status 3",
+      CRITERIALVADSUPPORT == 1 ~ "Non-Dischargeable LVAD after 2 Weeks, Status 3",
+      CRITERIALVADDISCSUPPORT == 1 ~ "Discretionary 30 Days with LVAD, Status 3",
+      DEVICERECALLEXCEPTION != 1 & EXCEPTION == 1 ~ "Exception, Status 3")) %>% 
+  select(WL_ID_CODE, Reason_For_Status, UNOS_CAND_STAT_CD, UNOS_CAND_STAT_DT, FORMEFFECTIVEDT, FORMSTATUS)
+
+
+status2complications = thoracic_stat2 %>% 
+  select(WL_ID_CODE, WLREG_AUDIT_ID_CODE, DEVICERECALLEXCEPTION, EXCEPTION, starts_with("CRITERIA"), 
+         UNOS_CAND_STAT_CD, UNOS_CAND_STAT_DT, FORMEFFECTIVEDT, FORMSTATUS) %>%
+  # filter(CriteriaMcsdMalfunction == 1 | DeviceRecallException == 1) %>%
+  mutate(
+    DEVICERECALLEXCEPTION = ifelse(is.na(DEVICERECALLEXCEPTION), 0, DEVICERECALLEXCEPTION),
+    Reason_For_Status = case_when(
+      CRITERIAMCSDMALFUNCTION == 1 ~ "Device Malfunction, Status 2",
+      DEVICERECALLEXCEPTION == 1 ~ "Device Recall, Status 2",
+      CRITERIALVADSUPPORT == 1 ~ "Non-Dischargeable LVAD, Status 2",
+      CRITERIADURABLEDEVSUPPORT == 1 ~ "TAH/BIVAD/RVAD, Status 2",
+      CRITERIAMCSDENDOVASSUPP == 1 ~ "PEVAD, Status 2",
+      CRITERIAIABPSUPPORT == 1 ~ "IABP, Status 2",
+      CRITERIAVENTEPISODE == 1 ~ "Recurrent VT/VF, Status 2",
+      DEVICERECALLEXCEPTION != 1 & EXCEPTION == 1 ~ "Exception, Status 2")) %>%
+  select(WL_ID_CODE, Reason_For_Status, UNOS_CAND_STAT_CD, UNOS_CAND_STAT_DT, FORMEFFECTIVEDT, FORMSTATUS)
+
+
+status1complications = thoracic_stat1 %>% 
+  select(WL_ID_CODE, WLREG_AUDIT_ID_CODE, DEVICERECALLEXCEPTION, EXCEPTION, starts_with("CRITERIA"), 
+         UNOS_CAND_STAT_CD, UNOS_CAND_STAT_DT, FORMEFFECTIVEDT, FORMSTATUS) %>%
+  # filter(CriteriaMcsdSupport == 1 | DeviceRecallException == 1) %>%
+  mutate(
+    DEVICERECALLEXCEPTION = ifelse(is.na(DEVICERECALLEXCEPTION), 0, DEVICERECALLEXCEPTION),
+    Reason_For_Status = case_when(
+      CRITERIAMCSDSUPPORT == 1 ~ "Life Threatening Ventricular Arrhythmia, Status 1",
+      DEVICERECALLEXCEPTION == 1 ~ "Device Recall, Status 1",
+      CRITERIAECMOSUPPORT == 1 ~ "ECMO, Status 1",
+      CRITERIABIVADSUPPORT == 1 ~ "BIVAD, Status 1",
+      DEVICERECALLEXCEPTION != 1 & EXCEPTION == 1 ~ "Exception, Status 1")) %>%
+  select(WL_ID_CODE, Reason_For_Status, UNOS_CAND_STAT_CD, UNOS_CAND_STAT_DT, FORMEFFECTIVEDT, FORMSTATUS)
+
+lvadcomplications = rbind(status1complications, status2complications, status3complications) %>% rename(RequestedCandStatCd = UNOS_CAND_STAT_CD)
+
+lvad_hx_list_episodes_justifications = lvad_hx_list_episodes %>% left_join(lvadcomplications, by = "WL_ID_CODE") %>% 
+  ungroup() %>% group_by(WL_ID_CODE, CHG_DATE) %>%
+  mutate(
+    placeholder = case_when(
+      UNOS_CAND_STAT_CD == 2999 | (UNOS_CAND_STAT_CD == RequestedCandStatCd & CHG_DATE == FORMEFFECTIVEDT) | UNOS_CAND_STAT_CD == 2140 ~ 1,
+      TRUE ~ 0)) %>% filter(placeholder == 1) %>% ungroup() 
+
+lvads1 = lvad_hx_list_episodes_justifications %>% group_by(WL_ID_CODE, CHG_DATE) %>% filter(UNOS_CAND_STAT_CD == 2999 | UNOS_CAND_STAT_CD == 2140) %>% slice(1) %>%
+  mutate(WLREG_AUDIT_ID_CODE = NA, RequestedCandStatCd = NA, FORMEFFECTIVEDT = NA, FORMSTATUS = NA)
+
+lvads2 = lvad_hx_list_episodes_justifications %>% group_by(WL_ID_CODE, CHG_DATE) %>% 
+  filter(UNOS_CAND_STAT_CD == RequestedCandStatCd & CHG_DATE == FORMEFFECTIVEDT)
+
+
+lvad_hx_list_episodes_justifications = rbind(lvads1, lvads2) %>% ungroup %>% group_by(WL_ID_CODE) %>% arrange(CHG_DATE)
+
+
+# status4complications = just_form_hr_stat4 %>% select(PX_ID, JustId, starts_with("Criteria")) %>% 
+#   left_join(just_form_hr %>% select(JustId, Exception, DeviceRecallException, FormEffectiveDt, FormExpirationDt, FormStatus_descrip, listing_description, IsActiveForm, RequestedCandStatCd), by = "JustId") %>%
+#   mutate(
+#     DeviceRecallException = ifelse(is.na(DeviceRecallException), 0, DeviceRecallException),
+#     Reason_For_Status = case_when(
+#       CriteriaLvadSupport == 1 ~ "LVAD, Status 4",
+#       CriteriaInotropeSupport == 1 ~ "Inotropes, Status 4",
+#       CriteriaHeartDisease == 1 ~ "CHD, Status 4",
+#       CriteriaIschemicHeart == 1 ~ "Ischemic Heart Disease, Status 4",
+#       CriteriaCardiomyopathy == 1 ~ "Cardiomyopathy, Status 4",
+#       CriteriaRetransplant == 1 ~ "Re-Tx, Status 4",
+#       DeviceRecallException == 1 ~ "Device Recall, Status 4",
+#       Exception == 1 ~ "Exception, Status 4")) %>%
+#     select(PX_ID, JustId, FormEffectiveDt, FormExpirationDt, FormStatus_descrip, listing_description, Reason_For_Status, IsActiveForm, RequestedCandStatCd)
+
+
+
+lvad_complications_dataframe = lvad_hx_list_episodes_justifications %>%
+  mutate(
+    ComplicationBinaryCode = ifelse(Reason_For_Status == "Discretionary 30 Days with LVAD, Status 3" | is.na(Reason_For_Status), 0, 1),
+    index_of_complication = which(ComplicationBinaryCode == 1) [1],
+    index_of_complication = ifelse(is.na(index_of_complication), 0, index_of_complication),
+    date_of_complication = if_else(index_of_complication == 0, NA, nth(FORMEFFECTIVEDT, first(index_of_complication))),
+    actual_complication = if_else(index_of_complication == 0, NA, nth(Reason_For_Status, first(index_of_complication)))) %>% slice(1) %>%
+  mutate(
+    complication_outcome = case_when(
+      REM_CD == 4 & is.na(date_of_complication) ~ 1,
+      (REM_CD == 8 | REM_CD == 13) & is.na(date_of_complication) ~ 2,
+      !is.na(date_of_complication) ~ 3,
+      TRUE ~ 0),
+    time_to_complication = case_when(
+      complication_outcome == 1 ~ as.numeric(difftime(TX_DATE, durable_lvad_date, units = "days")),
+      complication_outcome == 2 ~ as.numeric(difftime(END_DATE, durable_lvad_date, units = "days")),
+      complication_outcome == 3 ~ as.numeric(difftime(date_of_complication, durable_lvad_date, units = "days")),
+      TRUE ~ as.numeric(difftime(END_DATE, durable_lvad_date, units = "days"))),
+    time_to_complication = ifelse(time_to_complication < 0, 0, time_to_complication),
+    time_to_complication_years = time_to_complication / 365.25) %>%
+  select(WL_ID_CODE, durable_lvad_date, VAD_BRAND, END_DATE, Reason_For_Status, date_of_complication, actual_complication, complication_outcome, time_to_complication, time_to_complication_years) %>%
+  mutate(
+    time_at_status1_death_det = time_at_status1_death,
+    time_at_status2_death_det = time_at_status2_death,
+    time_at_status3_death_det = time_at_status3_death)
+    
+missing_ids = lvad_hx_list %>% filter(!WL_ID_CODE %in% lvad_complications_dataframe$WL_ID_CODE) %>%
+  mutate(OUTCOME = as.factor(OUTCOME),
+         time_at_status1_death_det = time_at_status1_death,
+         time_at_status2_death_det = time_at_status2_death,
+         time_at_status3_death_det = time_at_status3_death,
+         Reason_For_Status = NA,
+         date_of_complication = NA,
+         actual_complication = NA,
+         complication_outcome = 0,
+         time_to_complication = TIME,
+         time_to_complication = ifelse(time_to_complication < 0, 0, time_to_complication),
+         time_to_complication_years = time_to_complication / 365.25)
+
+lvad_complications_dataframe = rbind(lvad_complications_dataframe, missing_ids) %>% 
+  mutate(complication_before_status3_time = ifelse(complication_outcome == 3 & time_to_complication <= time_at_status3_death_det, 1, 0),
+         complication_before_status2_time = ifelse(complication_outcome == 3 & time_to_complication <= time_at_status2_death_det, 1, 0),
+         complication_before_status1_time = ifelse(complication_outcome == 3 & time_to_complication <= time_at_status1_death_det, 1, 0)) %>%
+  select(-Reason_For_Status) %>%
+  mutate(VAD_BRAND_TY = ifelse(VAD_BRAND == "HeartMate III", "HeartMate III", "Other LVAD"))
+
+lvad_complications_dataframe$complication_outcome <- factor(lvad_complications_dataframe$complication_outcome,
+                                                            levels = c("0", "1", "2", "3"), 
+                                                            labels = c("Censored", "Transplant without Complication/Status Upgrade",
+                                                                       "Death/Deterioration before Complication/Status Upgrade",
+                                                                       "LVAD Complication/Status Upgrade")) 
+
+options("ggsurvfit.switch-color-linetype" = TRUE)
+
+
+complication_plot <- survfit2(Surv(time_to_complication_years, complication_outcome) ~ 1, data = lvad_complications_dataframe) %>%
+  ggcuminc(
+    outcome = c("Transplant without Complication/Status Upgrade", 
+                "Death/Deterioration before Complication/Status Upgrade", "LVAD Complication/Status Upgrade"),
+    linewidth = 1) + 
+  add_confidence_interval(alpha = 0.25) +
+  add_risktable(size = 7, theme = theme_risktable_default(plot.title.size = 18, axis.text.y.size = 18)) +
+  coord_cartesian(xlim = c(0, 5)) +
+  #scale_x_continuous(breaks = c(0, 45, 90, 135, 180)) +
+  scale_y_continuous(
+    limits = c(0, 1),
+    labels = scales::percent, 
+    expand = c(0.01, 0)
+  ) +
+  #geom_hline(yintercept = status2asymptote, linetype = 5, color = "red", linewidth = 1) +
+  #geom_hline(yintercept = status3asymptote, linetype = 5, color = "blue", linewidth = 1) +
+  #geom_vline(xintercept = time_at_status3_death, linetype = "dotted", color = "black", linewidth = 1) +
+  #geom_vline(xintercept = time_at_status2_death, linetype = "dotted", color = "black", linewidth = 1) +
+  xlab("Years after LVAD Implantation") +
+  ylab("Cumulative Incidence") +
+  theme_classic() +
+  guides(color = guide_legend(nrow = 3, byrow = TRUE)) +
+  #guides(color = guide_legend(nrow = 1, byrow=TRUE)) +
+  scale_color_manual(values = c('black', 'darkred', '#FA9E4D', "#496061")) +
+  scale_fill_manual(values = c('#54738E', '#82AC7C', 'violet', "#8dd9d7")) +
+  theme(plot.title = element_text(size = 18),
+        legend.title = element_blank(),
+        legend.position = "bottom",
+        axis.text.x = element_text(size = 18),
+        axis.title.x = element_text(size = 20),
+        axis.text.y = element_text(size = 18),
+        axis.title.y = element_text(size = 20),
+        legend.text = element_text(size = 20))
+
+
+complication_plot_with_vad_brand <- survfit2(Surv(time_to_complication_years, complication_outcome) ~ VAD_BRAND_TY, 
+                                             data = lvad_complications_dataframe) %>%
+  ggcuminc(
+    outcome = c("Transplant without Complication/Status Upgrade", 
+                "Death/Deterioration before Complication/Status Upgrade", "LVAD Complication/Status Upgrade"),
+    linewidth = 1) + 
+  add_confidence_interval(alpha = 0.25) +
+  add_risktable(size = 7, theme = theme_risktable_default(plot.title.size = 18, axis.text.y.size = 18)) +
+  coord_cartesian(xlim = c(0, 5)) +
+  #scale_x_continuous(breaks = c(0, 45, 90, 135, 180)) +
+  scale_y_continuous(
+    limits = c(0, 1),
+    labels = scales::percent, 
+    expand = c(0.01, 0)
+  ) +
+  #geom_hline(yintercept = status2asymptote, linetype = 5, color = "red", linewidth = 1) +
+  #geom_hline(yintercept = status3asymptote, linetype = 5, color = "blue", linewidth = 1) +
+  #geom_vline(xintercept = time_at_status3_death, linetype = "dotted", color = "black", linewidth = 1) +
+  #geom_vline(xintercept = time_at_status2_death, linetype = "dotted", color = "black", linewidth = 1) +
+  xlab("Years after LVAD Implantation") +
+  ylab("Cumulative Incidence") +
+  theme_classic() +
+  guides(color = guide_legend(nrow = 3, byrow = TRUE)) +
+  #guides(color = guide_legend(nrow = 1, byrow=TRUE)) +
+  scale_color_manual(values = c('black', 'darkred', '#FA9E4D', "#496061")) +
+  scale_fill_manual(values = c('#54738E', '#82AC7C', 'violet', "#8dd9d7")) +
+  theme(plot.title = element_text(size = 18),
+        legend.title = element_blank(),
+        legend.position = "bottom",
+        axis.text.x = element_text(size = 18),
+        axis.title.x = element_text(size = 20),
+        axis.text.y = element_text(size = 18),
+        axis.title.y = element_text(size = 20),
+        legend.text = element_text(size = 20)) +
+  annotate("text", x = 0, y = 0.95, hjust = 0, size = 6,
+           label = paste0(
+             "Death/Deterioration p: ", 0.045)) + 
+  annotate("text", x = 0, y = 0.88, hjust = 0, size = 6,
+           label = paste0(
+             "Transplant p: ", 0.085)) + 
+  annotate("text", x = 0, y = 0.81, hjust = 0, size = 6,
+           label = paste0(
+             "LVAD Complication/Status Upgrade p: ", "< 0.001"))
+
+
+cifresults_complication <- cuminc(Surv(time_to_complication_years, complication_outcome) ~ VAD_BRAND_TY, 
+                                  data = as.data.frame(lvad_complications_dataframe)) %>%
+  tbl_cuminc(
+    times = 5,
+    outcomes = c("Transplant without Complication/Status Upgrade", 
+                "Death/Deterioration before Complication/Status Upgrade", "LVAD Complication/Status Upgrade"),
+    estimate_fun = gtsummary::label_style_number(scale = 100, digits = 10)) %>% add_p()
+
+
+
+
+# is.na(Reason_For_Status) | Reason_For_Status == "ECMO, Status 1" | Reason_For_Status == "BIVAD, Status 1" | Reason_For_Status == "Exception, Status 1" | Reason_For_Status == "Exception, Status 2" | Reason_For_Status == "Recurrent VT/VF, Status 2" | Reason_For_Status == "IABP, Status 2" | Reason_For_Status == "PEVAD, Status 2" | Reason_For_Status == "TAH/BIVAD/RVAD, Status 2" | Reason_For_Status == "Non-Dischargeable LVAD, Status 2" | Reason_For_Status == "VA ECMO after 7 Days, Status 3" | Reason_For_Status == "Inotropes" | Reason_For_Status == "PEVAD after 2 Weeks, Status 3" | Reason_For_Status == "IABP after 2 Weeks, Status 3" | Reason_For_Status == "LVAD with Life Threatening VA after 7 Days, Status 3" | Reason_For_Status == "Non-Dischargeable LVAD after 2 Weeks, Status 3" | Reason_For_Status == "Discretionary 30 Days with LVAD, Status 3" | Reason_For_Status == "Exception, Status 3" | Reason_For_Status == "LVAD, Status 4" | Reason_For_Status == "Inotropes, Status 4" | Reason_For_Status == "CHD, Status 4" | Reason_For_Status == "Ischemic Heart Disease, Status 4" | Reason_For_Status == "Cardiomyopathy, Status 4" | Reason_For_Status == "Re-Tx, Status 4" | Reason_For_Status == "Exception, Status 4"
+#     
+    # index_of_complication = which(ComplicationBinaryCode == 1) [1],
+    # index_of_complication = ifelse(is.na(index_of_complication), 0, index_of_complication),
+    # date_of_complication = if_else(index_of_complication == 0, NA, nth(FormEffectiveDt, first(index_of_complication))),
+    # Outcome = case_when(
+    #   !is.na(date_of_complication) ~ 1,
+    #   is.na(date_of_complication) & !is.na(REC_TX_DT) ~ 2,
+    #   is.na(date_of_complication) & (CAN_REM_CD == 8 | CAN_REM_CD == 13) ~ 3,
+    #   TRUE ~ 0))
+
+
+
+```
+
+
+``` {r bar graph}
+
+lvads_all_time = thoracic_mcs_device %>% 
+  select(WL_ID_CODE, DEVICE_TYPE, LVAD_BRAND, VAD_BRAND, VENTRICULAR_SUPPORT, IMPLANT_DATE, EXPLANT_DATE, INPLACE, MCS_REM_REASON) %>%
+  filter(DEVICE_TYPE == "Dischargeable VAD" | (DEVICE_TYPE == "LVAD" & grepl(paste(lvad_keywords, collapse = "|"), LVAD_BRAND, ignore.case = TRUE))) %>%
+  filter(EXPLANT_DATE >= mdy("02-01-2025") | is.na(EXPLANT_DATE)) %>% filter(IMPLANT_DATE <= mdy("02-01-2025"))
+
+
+cand_list_bargraph = thoracic_data %>% select(WL_ID_CODE, INIT_DATE, END_DATE, INIT_AGE, WL_ORG) %>% 
+  filter(INIT_AGE >= 18) %>% filter(WL_ORG == "HR") %>% filter(END_DATE > mdy("01-31-2025")) %>% filter(INIT_DATE < mdy("02-02-2025")) %>%
+  left_join(thoracic_wlhistory_data %>% select(WL_ID_CODE, CHG_DATE, CHG_TY, UNOS_CAND_STAT_CD)) %>% group_by(WL_ID_CODE) %>% arrange(CHG_DATE) %>%
+  filter(CHG_TY == "M") %>%
+  mutate(
+    CHG_END_DATE = lead(CHG_DATE) - 1,
+    CHG_END_DATE = ifelse(is.na(CHG_END_DATE), END_DATE, CHG_END_DATE),
+    CHG_END_DATE = as.Date(CHG_END_DATE, origin = "1970-01-01"),
+    ON_DATE = ifelse(CHG_DATE <= mdy("02-01-2025") & CHG_END_DATE >= mdy("02-01-2025"), 1, 0)) %>%
+  filter(ON_DATE == 1) %>% 
+  left_join(lvads_all_time) %>% 
+  mutate(
+    TIME_ON_LVAD = as.numeric(difftime(mdy("02-01-2025"), IMPLANT_DATE, units = "days")),
+    calculated_status3 = time_at_status3_death * 365.25,
+    calculated_status2 = time_at_status2_death * 365.25,
+    calculated_status1 = time_at_status1_death * 365.25,
+    policy_status3 = 6 * 365.25,
+    policy_status2 = 8 * 365.25,
+    NEW_STAT_CD_CALCULATED = case_when(
+      !is.na(DEVICE_TYPE) & UNOS_CAND_STAT_CD != 2999 & TIME_ON_LVAD >= calculated_status3 & 
+        TIME_ON_LVAD < calculated_status2 & UNOS_CAND_STAT_CD >= 2130 ~ 2130,
+      !is.na(DEVICE_TYPE) & UNOS_CAND_STAT_CD != 2999 & TIME_ON_LVAD >= calculated_status3 & 
+        TIME_ON_LVAD < calculated_status1 & UNOS_CAND_STAT_CD >= 2120 ~ 2120,
+      !is.na(DEVICE_TYPE) & UNOS_CAND_STAT_CD != 2999 & TIME_ON_LVAD >= calculated_status1 & 
+        UNOS_CAND_STAT_CD >= 2110 ~ 2110,
+      TRUE ~ UNOS_CAND_STAT_CD),
+    NEW_STAT_CD_POLICY = case_when(
+      !is.na(DEVICE_TYPE) & UNOS_CAND_STAT_CD != 2999 & TIME_ON_LVAD >= policy_status3 & 
+        TIME_ON_LVAD < policy_status2 & UNOS_CAND_STAT_CD >= 2130 ~ 2130,
+      !is.na(DEVICE_TYPE) & UNOS_CAND_STAT_CD != 2999 & TIME_ON_LVAD >= policy_status2 & 
+        UNOS_CAND_STAT_CD >= 2120 ~ 2120,
+      TRUE ~ UNOS_CAND_STAT_CD),
+    LVAD = ifelse(!is.na(DEVICE_TYPE), "LVAD", "No LVAD"),
+    UNOS_CAND_STAT_CD = case_when(
+      grepl("2110", UNOS_CAND_STAT_CD) ~ "1",
+      grepl("2120", UNOS_CAND_STAT_CD) ~ "2",
+      grepl("2130", UNOS_CAND_STAT_CD) ~ "3",
+      grepl("2140", UNOS_CAND_STAT_CD) ~ "4",
+      grepl("2150", UNOS_CAND_STAT_CD) ~ "5",
+      grepl("2160", UNOS_CAND_STAT_CD) ~ "6",
+      TRUE ~ "Inactive"),
+    NEW_STAT_CD_CALCULATED = case_when(
+      grepl("2110", NEW_STAT_CD_CALCULATED) ~ "1",
+      grepl("2120", NEW_STAT_CD_CALCULATED) ~ "2",
+      grepl("2130", NEW_STAT_CD_CALCULATED) ~ "3",
+      grepl("2140", NEW_STAT_CD_CALCULATED) ~ "4",
+      grepl("2150", NEW_STAT_CD_CALCULATED) ~ "5",
+      grepl("2160", NEW_STAT_CD_CALCULATED) ~ "6",
+      TRUE ~ "Inactive"),
+    NEW_STAT_CD_POLICY = case_when(
+      grepl("2110", NEW_STAT_CD_POLICY) ~ "1",
+      grepl("2120", NEW_STAT_CD_POLICY) ~ "2",
+      grepl("2130", NEW_STAT_CD_POLICY) ~ "3",
+      grepl("2140", NEW_STAT_CD_POLICY) ~ "4",
+      grepl("2150", NEW_STAT_CD_POLICY) ~ "5",
+      grepl("2160", NEW_STAT_CD_POLICY) ~ "6",
+      TRUE ~ "Inactive")) %>% ungroup() %>%
+  select(LVAD, UNOS_CAND_STAT_CD, NEW_STAT_CD_CALCULATED, NEW_STAT_CD_POLICY)
+
+
+
+
+data_long <- cand_list_bargraph %>%
+  select(UNOS_CAND_STAT_CD, NEW_STAT_CD_CALCULATED, NEW_STAT_CD_POLICY) %>%
+  pivot_longer(cols = everything(), names_to = "Status_Type", values_to = "Status_Value")
+
+# Count the number of patients for each status type
+count_data <- data_long %>%
+  group_by(Status_Type, Status_Value) %>%
+  summarise(Count = n()) %>%
+  mutate(percentage = (Count / sum(Count)) * 100)
+
+count_data$Status_Type <- factor(count_data$Status_Type,
+                                 levels = c("UNOS_CAND_STAT_CD", "NEW_STAT_CD_CALCULATED", "NEW_STAT_CD_POLICY"), 
+                                 labels = c("Actual Waiting List\non February 1, 2025", "Estimated Thresholds", "September 2026 Policy")) 
+
+# Create the bar plot with Status_Type on the x-axis
+barplot = ggplot(count_data, aes(x = Status_Type, y = Count, fill = Status_Value)) +
+  geom_bar(stat = "identity", position = "stack", color = "black") +
+  geom_text(data = subset(count_data, !(Status_Value == "1")), 
+            aes(label = paste0(Count, " (", sprintf("%.1f", percentage), "%)")), 
+            position = position_stack(vjust = 0.5),
+            size = 6) +
+  geom_text(data = subset(count_data, Status_Value == "1"),
+            aes(label = paste0(Count, " (", sprintf("%.1f", percentage), "%)")),
+            y = 3100,
+            stat = "identity",
+            size = 6) +
+  labs(title = "",
+       x = "Policy Type",
+       y = "Number of Patients on Adult Heart Waitlist") +
+  theme_classic() +
+  scale_fill_brewer(palette = "Set1") +
+  guides(fill = guide_legend(title = "Status Level")) +
+  theme(plot.title = element_text(size = 18),
+        axis.text.x = element_text(size = 18),
+        axis.title.x = element_text(size = 20),
+        axis.text.y = element_text(size = 18),
+        axis.title.y = element_text(size = 20),
+        legend.text = element_text(size = 20),
+        legend.title = element_text(size = 20))
+
+
+has_lvad = cand_list_bargraph %>% filter(LVAD == "LVAD") %>% 
+  select(UNOS_CAND_STAT_CD, NEW_STAT_CD_CALCULATED, NEW_STAT_CD_POLICY)
+
+data_long_just_lvad <- has_lvad %>%
+  select(UNOS_CAND_STAT_CD, NEW_STAT_CD_CALCULATED, NEW_STAT_CD_POLICY) %>%
+  pivot_longer(cols = everything(), names_to = "Status_Type", values_to = "Status_Value")
+
+# Count the number of patients for each status type
+count_data_just_lvad <- data_long_just_lvad %>%
+  group_by(Status_Type, Status_Value) %>%
+  summarise(Count = n()) %>%
+  mutate(percentage = (Count / sum(Count)) * 100)
+
+count_data_just_lvad$Status_Type <- factor(count_data_just_lvad$Status_Type,
+                                           levels = c("UNOS_CAND_STAT_CD", "NEW_STAT_CD_CALCULATED", "NEW_STAT_CD_POLICY"), 
+                                           labels = c("Actual Waiting List\non February 1, 2025", 
+                                                      "Estimated Thresholds", "September 2026 Policy")) 
+
+
+barplot_just_lvads = ggplot(count_data_just_lvad, aes(x = Status_Type, y = Count, fill = Status_Value)) +
+  geom_bar(stat = "identity", position = "stack", color = "black") +
+  geom_text(aes(label = paste0(Count, " (", sprintf("%.1f", percentage), "%)")), 
+            position = position_stack(vjust = 0.5),
+            size = 6) +
+  labs(title = "",
+       x = "Policy Type",
+       y = "Number of Patients with Durable\nLVADs on Adult Heart Waitlist") +
+  theme_classic() +
+  scale_fill_brewer(palette = "Set1") +
+  guides(fill = guide_legend(title = "Status Level")) +
+  theme(plot.title = element_text(size = 18),
+        axis.text.x = element_text(size = 18),
+        axis.title.x = element_text(size = 20),
+        axis.text.y = element_text(size = 18),
+        axis.title.y = element_text(size = 20),
+        legend.text = element_text(size = 20),
+        legend.title = element_text(size = 20))
+
+
+
+
+```
