@@ -1,0 +1,1022 @@
+---
+title: "lvad_priority_data_cleaning"
+output: html_document
+date: "2026-01-20"
+---
+
+```{r setup, include=FALSE}
+rm(list=ls())
+library(knitr)
+opts_chunk$set(comment = NA, prompt = FALSE, cache = FALSE, echo = TRUE,
+                      results = "asis")
+
+library(tidyverse)
+library(haven)
+library(rmdformats)
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(gtsummary)
+library(cowplot)
+library(survival)
+library(survminer)
+library(ggsurvfit)
+library(cmprsk)
+library(tidycmprsk)
+library(RVAideMemoire)
+
+```
+
+
+``` {r data join}
+
+just_form_hr_data_link = JustFormHRDataLink_2025Q3
+just_form_hr = JustFormHR_2025Q3
+
+risk_strat_data_hr = RiskStratDataHR_2025Q3 %>% 
+  mutate(ChangeDt = floor_date(ChangeDate, unit = "day")) %>%
+  select(-ChangeDate) %>% 
+  full_join(just_form_hr_data_link %>%
+              dplyr::select(-ChangeDate, -InitialFormJustId), by = "WlregAuditId") %>% 
+  mutate(PX_ID = px_id) %>% 
+  dplyr::select(-px_id) %>%
+  
+  # removes entries that have valid WlregAuditId but missing JustId
+  filter(!is.na(JustId)) %>%
+  
+  # there are instances in which two just. forms were submitted on the same day for a
+  # single PX_ID. The time step in this process is one day, so these are removed
+  group_by(PX_ID, ChangeDt) %>% slice_max(JustId) %>% 
+  ungroup() %>% 
+  
+  dplyr::select(-RiskStratId, -WlregAuditId, -ChangeUserId, -ChangeRequestorId) %>% 
+  select(-(ends_with("St"))) %>% 
+  select(-(starts_with("CandHist"))) %>%
+  select(-(starts_with("SenData"))) %>%
+  select(-(ends_with("Perf"))) %>%
+  select(-(starts_with("CPT"))) %>%
+  relocate(ChangeDt:PX_ID)
+
+
+# right_join to filter out erroneous forms, as above
+just_form_hr_data_link = just_form_hr_data_link %>%
+  select(-ChangeDate) %>% 
+  right_join(risk_strat_data_hr %>% 
+              select(ChangeDt, JustId, PX_ID), by = "JustId")
+
+# right_join to filter out erroneous forms, as above
+just_form_hr = just_form_hr %>% 
+  select(JustId, RequestedCandStatCd, RequestedCandStat_descrip, ExtensionNumber, Exception, ThorSupportDevicePrimary, ThorSupportDeviceSecondary, descrip, FormAddDt, FormEffectiveDt, FormExpirationDt, FormReceiptDt, FormStatus_descrip, ApplicationStatus_descrip, ChangeDate) %>%
+  mutate(ChangeDt = floor_date(ChangeDate, unit = "day")) %>%
+  mutate(listing_description = descrip) %>% 
+  select(-descrip) %>% 
+  right_join(just_form_hr_data_link %>% 
+              select(-WlregAuditId, -InitialFormJustId), by = "JustId")
+
+
+thor_support_device = ThorSupportDevice_2025Q3 %>%
+  mutate(ChangeDt = as.Date(ChangeDate)) %>%
+  left_join(just_form_hr %>% select(ThorSupportDevicePrimary, PX_ID),
+            by = c("DeviceId" = "ThorSupportDevicePrimary")) %>%
+  select(-DeviceId) %>%
+  distinct(.keep_all = TRUE)
+
+  # status_just_episode provides same info as stathist_thor, so not including it
+  # # join status episode information by JustId
+  # full_join(status_just_episode %>% select(JustId:EndDate), by = "JustId")
+
+# thor_support_device seems to include many duplicates, include at your own risk
+
+just_form_hr_stat1 = JustFormHRStat1_2025Q3 %>% 
+  select(-ChangeDate) %>%
+  left_join(just_form_hr_data_link %>% 
+              select(JustId, PX_ID, ChangeDt), by = "JustId") %>%
+  left_join(just_form_hr %>%
+              select(JustId, Exception, FormEffectiveDt, FormExpirationDt, RequestedCandStatCd), by = "JustId")
+
+
+just_form_hr_stat2 = JustFormHRStat2_2025Q3 %>% 
+  select(-ChangeDate) %>%
+  left_join(just_form_hr_data_link %>% 
+              select(JustId, PX_ID, ChangeDt), by = "JustId") %>%
+  left_join(just_form_hr %>%
+              select(JustId, Exception, FormEffectiveDt, FormExpirationDt, RequestedCandStatCd), by = "JustId")
+
+
+just_form_hr_stat3 = JustFormHRStat3_2025Q3 %>% 
+  select(-ChangeDate) %>%
+  left_join(just_form_hr_data_link %>% 
+              select(JustId, PX_ID, ChangeDt), by = "JustId") %>%
+  left_join(just_form_hr %>%
+              select(JustId, Exception, FormEffectiveDt, FormExpirationDt, RequestedCandStatCd), by = "JustId")
+
+
+just_form_hr_stat4 = JustFormHRStat4_2025Q3 %>% 
+  select(-ChangeDate) %>%
+  left_join(just_form_hr_data_link %>% 
+              select(JustId, PX_ID, ChangeDt), by = "JustId") %>%
+  left_join(just_form_hr %>%
+              select(JustId, Exception, FormEffectiveDt, FormExpirationDt, RequestedCandStatCd), by = "JustId")
+
+```
+
+
+
+
+``` {r identifying lvad patients}
+
+thor_support_device = ThorSupportDevice_2025Q3 %>%
+  mutate(ChangeDt = as.Date(ChangeDate)) %>%
+  left_join(just_form_hr %>% select(ThorSupportDevicePrimary, PX_ID),
+            by = c("DeviceId" = "ThorSupportDevicePrimary")) %>%
+  select(-DeviceId) %>%
+  distinct(.keep_all = TRUE)
+
+
+status3complications = just_form_hr_stat3 %>% 
+  select(PX_ID, Exception, RequestedCandStatCd, FormEffectiveDt, starts_with("CRITERIA")) %>%
+  # filter(CriteriaMcsdWithHemo == 1 | CriteriaMcsdWithPump == 1 | CriteriaMcsdWithRhf == 1 | CriteriaMcsdInfection == 1 |  CriteriaMcsdMucosalBleed == 1 | CriteriaMcsdWithAI == 1 | DeviceRecallException == 1) %>%
+  mutate(
+    Reason_For_Status = case_when(
+      CriteriaMcsdWithHemo == 1 ~ "Hemolysis, Status 3",
+      CriteriaMcsdWithPump == 1 ~ "Pump Thrombosis, Status 3",
+      CriteriaMcsdWithRhf == 1 ~ "Right Heart Failure, Status 3",
+      CriteriaMcsdInfection == 1 ~ "Device Infection, Status 3",
+      CriteriaMcsdMucosalBleed == 1 ~ "Mucosal Bleeding, Status 3",
+      CriteriaMcsdWithAI == 1 ~ "Aortic Insufficiency, Status 3",
+      CriteriaVaEcmoSupport == 1 ~ "VA ECMO after 7 Days, Status 3",
+      CriteriaInotropeSupport == 1 ~ "Inotropes, Status 3",
+      CriteriaPercuSupport == 1 ~ "PEVAD after 2 Weeks, Status 3",
+      CriteriaIabpSupport == 1 ~ "IABP after 2 Weeks, Status 3",
+      CriteriaMcsdSupport == 1 ~ "LVAD with Life Threatening VA after 7 Days, Status 3",
+      CriteriaLvadSupport == 1 ~ "Non-Dischargeable LVAD after 2 Weeks, Status 3",
+      CriteriaLvadDiscSupport == 1 ~ "Discretionary 30 Days with LVAD, Status 3",
+      Exception == 1 ~ "Exception, Status 3")) %>% 
+  select(PX_ID, Reason_For_Status, RequestedCandStatCd, FormEffectiveDt)
+
+
+status2complications = just_form_hr_stat2 %>% 
+  select(PX_ID, Exception, RequestedCandStatCd, FormEffectiveDt, starts_with("CRITERIA")) %>%
+  # filter(CriteriaMcsdMalfunction == 1 | DeviceRecallException == 1) %>%
+  mutate(
+    Reason_For_Status = case_when(
+      CriteriaMcsdMalfunction == 1 ~ "Device Malfunction, Status 2",
+      CriteriaLvadSupport == 1 ~ "Non-Dischargeable LVAD, Status 2",
+      CriteriaDurableDevSupport == 1 ~ "TAH/BIVAD/RVAD, Status 2",
+      CriteriaMcsdEndovasSupp == 1 ~ "PEVAD, Status 2",
+      CriteriaIabpSupport == 1 ~ "IABP, Status 2",
+      CriteriaVentEpisode == 1 ~ "Recurrent VT/VF, Status 2",
+      Exception == 1 ~ "Exception, Status 2")) %>%
+  select(PX_ID, Reason_For_Status, RequestedCandStatCd, FormEffectiveDt)
+
+
+
+status1complications = just_form_hr_stat1 %>% 
+  select(PX_ID, Exception, RequestedCandStatCd, FormEffectiveDt, starts_with("CRITERIA")) %>%
+  # filter(CriteriaMcsdSupport == 1 | DeviceRecallException == 1) %>%
+  mutate(
+    Reason_For_Status = case_when(
+      CriteriaMcsdSupport == 1 ~ "Life Threatening Ventricular Arrhythmia, Status 1",
+      CriteriaEcmoSupport == 1 ~ "ECMO, Status 1",
+      CriteriaBivadSupport == 1 ~ "BIVAD, Status 1",
+      Exception == 1 ~ "Exception, Status 1")) %>%
+  select(PX_ID, Reason_For_Status, RequestedCandStatCd, FormEffectiveDt)
+
+lvadcomplications = rbind(status1complications, status2complications, status3complications)
+
+lvad_keywords = c("heartmate", "hm", "lionheart", "arrow", "jarvik", "micromed", "debakey", "novacor", "evaheart", "worldheart", "levacor", "reliantheart", "heartware", "heart ware", "heart mate")
+
+#Durable lvads defined as:
+# devices with the appropriate code
+# devices with "unknown" code but qualifying status 4 by LVAD on that date
+# "unknown" device codes with the name of a durable LVAD in their description
+
+lvads = thor_support_device %>% left_join(just_form_hr_stat4, by = c("PX_ID", "ChangeDt")) %>% filter(VadBrandId %in% c('202', '205', '206', '207', '208', '209', '210', '212', '213', '214', '223', '224', '233', '236', '239', '240', '312', '313', '314', '315', '316', '319', '322', '327', '330', '333', '334') | (VadBrandId == 999 & CriteriaLvadSupport == 1) | (VadBrandId == 999 & grepl(paste(lvad_keywords, collapse = "|"), OtherSpecify, ignore.case = TRUE)))
+
+lvads = lvads %>% select(PX_ID, ImplantDt, VadBrandId, OtherSpecify)
+
+
+lvad_list = cand_thor2025q2 %>% select(PERS_ID, PX_ID, CAN_LISTING_DT, CAN_INIT_STAT, CAN_DEATH_DT, PERS_OPTN_DEATH_DT, PERS_SSA_DEATH_DT, CAN_AGE_IN_MONTHS_AT_LISTING, WL_ORG, CAN_REM_DT, CAN_REM_CD, CAN_LISTING_CTR_CD, CAN_LAST_ACT_STAT_DT, CAN_LAST_INACT_STAT_DT, CAN_GENDER, CAN_ABO, CAN_DGN, CAN_RACE, CAN_ETHNICITY_SRTR, CAN_BMI, CAN_PRIMARY_PAY) %>% 
+  filter(CAN_AGE_IN_MONTHS_AT_LISTING / 12 > 17) %>% filter(WL_ORG == "HR") %>% 
+  filter(CAN_LISTING_DT <= mdy("05-31-2025")) %>% left_join(lvads) %>% rename("durable_lvad_date" = "ImplantDt") %>%
+  filter(duplicated(PX_ID) == FALSE)
+
+# discretionary_time = thoracic_stat3_2025q2 %>% select(WL_ID_CODE, UNOS_CAND_STAT_CD, CRITERIALVADDISCSUPPORT, FORMEFFECTIVEDT) %>% 
+#   filter(CRITERIALVADDISCSUPPORT == 1)
+
+# Exclude patients where LVAD was implanted on/after removal or last follow-up
+lvad_patient_list <- lvad_list %>% 
+  filter(durable_lvad_date >= mdy("10-18-2018") & durable_lvad_date <= mdy("05-31-2025")) %>%
+  mutate(
+    # Determine last follow-up date for patients still on waitlist
+    last_followup_date = pmax(CAN_LAST_ACT_STAT_DT, CAN_LAST_INACT_STAT_DT, na.rm = TRUE),
+    
+    # Determine the relevant cutoff date for each patient
+    cutoff_date = if_else(!is.na(CAN_REM_DT), 
+                          CAN_REM_DT,           # If removed, use removal date
+                          last_followup_date)    # If still listed, use last follow-up
+  ) %>%
+  # Exclude if LVAD date is on or after the cutoff
+  filter(durable_lvad_date < cutoff_date) %>%
+  select(-last_followup_date, -cutoff_date)  # Clean up temporary variables
+
+# Print summary of exclusions
+cat("\n=== LVAD PATIENT LIST FILTERING ===\n")
+cat(sprintf("Total with durable LVADs in date range: %d\n", 
+            nrow(lvad_list %>% filter(durable_lvad_date >= mdy("10-18-2018") & 
+                                      durable_lvad_date <= mdy("05-31-2025")))))
+cat(sprintf("After excluding LVAD on/after removal or last follow-up: %d\n", 
+            nrow(lvad_patient_list)))
+cat(sprintf("Excluded: %d patients\n", 
+            nrow(lvad_list %>% filter(durable_lvad_date >= mdy("10-18-2018") & 
+                                      durable_lvad_date <= mdy("05-31-2025"))) - 
+            nrow(lvad_patient_list)))
+
+
+# ============================================================================
+# STEP 1: ADD DEVICE TYPE TO PATIENT LIST
+# ============================================================================
+
+lvad_patient_list <- lvad_patient_list %>%
+  mutate(
+    device_type = case_when(
+      VadBrandId %in% c('330', '236') ~ "HeartMate 3",
+      grepl("heartmate 3|hm3|hm 3|heartmat iii|Heartmate III|heart mate", OtherSpecify, ignore.case = TRUE) ~ "HeartMate 3",
+      VadBrandId %in% c('316', '224') ~ "Heartware HVAD",
+      grepl("hvad|heartware|heart ware", OtherSpecify, ignore.case = TRUE) ~ "Heartware HVAD",
+      TRUE ~ "Other"
+    )
+  )
+
+cat("Device type distribution:\n")
+print(table(lvad_patient_list$device_type))
+
+# ============================================================================
+# STEP 2: CREATE STATUS HISTORY WITH DEVICE TYPE
+# ============================================================================
+
+# ============================================================================
+# CORRECTED: INCLUDE STATUS EPISODES ACTIVE AT LVAD IMPLANT
+# ============================================================================
+
+lvad_hx_list_episodes <- lvad_patient_list %>% 
+  select(PX_ID, durable_lvad_date, device_type, CAN_LISTING_DT, CAN_REM_DT, CAN_REM_CD,
+         CAN_AGE_IN_MONTHS_AT_LISTING, CAN_GENDER, CAN_ABO, CAN_RACE, CAN_ETHNICITY_SRTR,
+         CAN_LAST_ACT_STAT_DT, CAN_LAST_INACT_STAT_DT, CAN_LISTING_CTR_CD) %>%
+  left_join(stathist_thor2025q2 %>% select(PX_ID, CANHX_BEGIN_DT, CANHX_END_DT, CANHX_STAT_CD)) %>% 
+  # Convert dates for comparison
+  mutate(
+    durable_lvad_date_clean = as.Date(durable_lvad_date),
+    CANHX_BEGIN_DT_clean = as.Date(CANHX_BEGIN_DT),
+    CANHX_END_DT_clean = as.Date(CANHX_END_DT)
+  ) %>%
+  # CORRECTED FILTER: Include episodes that were active during/after LVAD
+  filter(
+    # Episode started on/after LVAD date, OR
+    CANHX_BEGIN_DT_clean >= durable_lvad_date_clean |
+    # Episode started before LVAD but was still active (ended after LVAD or ongoing)
+    (CANHX_BEGIN_DT_clean < durable_lvad_date_clean & 
+     (is.na(CANHX_END_DT_clean) | CANHX_END_DT_clean >= durable_lvad_date_clean))
+  ) %>%
+  # Clean up temporary date columns
+  select(-durable_lvad_date_clean, -CANHX_BEGIN_DT_clean, -CANHX_END_DT_clean) %>%
+  group_by(PX_ID) %>% 
+  arrange(PX_ID, CANHX_BEGIN_DT) %>%
+  ungroup()
+
+cat("\nStatus history episodes created:", nrow(lvad_hx_list_episodes), "\n")
+
+# Verify we have all patients
+unique_patients <- lvad_hx_list_episodes %>%
+  distinct(PX_ID) %>%
+  nrow()
+
+cat(sprintf("Unique patients in episodes: %d\n", unique_patients))
+cat(sprintf("Total patients in cohort: %d\n", nrow(lvad_patient_list)))
+cat(sprintf("Missing patients: %d\n", nrow(lvad_patient_list) - unique_patients))
+
+# ============================================================================
+# STEP 3: JOIN WITH COMPLICATIONS (SAME AS BEFORE)
+# ============================================================================
+
+lvad_hx_with_complications <- lvad_hx_list_episodes %>%
+  left_join(
+    lvadcomplications %>%
+      mutate(
+        is_discretionary = Reason_For_Status == "Discretionary 30 Days with LVAD, Status 3",
+        is_true_complication = !is_discretionary
+      ),
+    by = c("PX_ID" = "PX_ID", "CANHX_BEGIN_DT" = "FormEffectiveDt", "CANHX_STAT_CD" = "RequestedCandStatCd")
+  )
+
+cat(sprintf("\nStatus history with complications: %d episodes\n", nrow(lvad_hx_with_complications)))
+
+# Verify patient count again
+final_patient_count <- lvad_hx_with_complications %>%
+  distinct(PX_ID) %>%
+  nrow()
+
+cat(sprintf("Final unique patients: %d\n", final_patient_count))
+
+# Quick check on the 19 previously missing patients
+previously_missing_check <- lvad_hx_with_complications %>%
+  filter(PX_ID %in% missing_patients$PX_ID) %>%
+  group_by(PX_ID) %>%
+  slice(1) %>%
+  ungroup()
+
+cat(sprintf("\nPreviously missing patients now included: %d\n", nrow(previously_missing_check)))
+
+
+
+# ============================================================================
+# STEP 4: IDENTIFY FIRST TRUE COMPLICATION (Excluding Discretionary)
+# ============================================================================
+
+first_complication <- lvad_hx_with_complications %>%
+  # Convert dates for comparison
+  mutate(
+    CANHX_BEGIN_DT_clean = as.Date(CANHX_BEGIN_DT),
+    durable_lvad_date_clean = as.Date(durable_lvad_date)
+  ) %>%
+  # Only consider TRUE complications that occurred AFTER LVAD implant
+  filter(
+    is_true_complication == TRUE &
+    CANHX_BEGIN_DT_clean > durable_lvad_date_clean  # Strictly after LVAD date
+  ) %>%
+  group_by(PX_ID) %>%
+  arrange(CANHX_BEGIN_DT) %>%
+  slice(1) %>%
+  ungroup() %>%
+  select(PX_ID, 
+         complication_date = CANHX_BEGIN_DT, 
+         complication_reason = Reason_For_Status,
+         complication_stat_cd = CANHX_STAT_CD)
+
+cat(sprintf("\nPatients with complications AFTER LVAD implant: %d\n", nrow(first_complication)))
+
+# Optional: Check how many complications were excluded
+complications_excluded <- lvad_hx_with_complications %>%
+  mutate(
+    CANHX_BEGIN_DT_clean = as.Date(CANHX_BEGIN_DT),
+    durable_lvad_date_clean = as.Date(durable_lvad_date)
+  ) %>%
+  filter(
+    is_true_complication == TRUE &
+    CANHX_BEGIN_DT_clean <= durable_lvad_date_clean  # On or before LVAD
+  ) %>%
+  distinct(PX_ID) %>%
+  nrow()
+
+cat(sprintf("Patients with complications on/before LVAD (excluded): %d\n", complications_excluded))
+
+# ============================================================================
+# STEP 5: IDENTIFY STATUS 5/6 TRANSITIONS (Only after Status 4, and only if they don't return to Status 4+)
+# ============================================================================
+
+# First, identify who reached Status 4
+reached_status4 <- lvad_hx_with_complications %>%
+  filter(CANHX_STAT_CD == 2140) %>%
+  group_by(PX_ID) %>%
+  arrange(CANHX_BEGIN_DT) %>%
+  slice(1) %>%
+  ungroup() %>%
+  select(PX_ID, Reason_For_Status, first_status4_date = CANHX_BEGIN_DT)
+
+cat("Patients who reached Status 4:", nrow(reached_status4), "\n")
+
+# Find Status 5/6 transitions that occur AFTER Status 4
+status5_6_after_status4_preliminary <- lvad_hx_with_complications %>%
+  inner_join(reached_status4, by = "PX_ID") %>%
+  filter(CANHX_STAT_CD %in% c(2150, 2160)) %>%
+  filter(CANHX_BEGIN_DT > first_status4_date) %>%  # Only after Status 4
+  group_by(PX_ID) %>%
+  arrange(CANHX_BEGIN_DT) %>%
+  slice(1) %>%
+  ungroup() %>%
+  select(PX_ID, status5_6_date = CANHX_BEGIN_DT, status5_6_code = CANHX_STAT_CD)
+
+cat("Patients who reached Status 5/6 AFTER Status 4:", nrow(status5_6_after_status4_preliminary), "\n")
+
+# Check if they returned to Status 4 OR HIGHER (Status 1/2/3/4) AFTER Status 5/6
+returned_to_status4plus_after_5_6 <- lvad_hx_with_complications %>%
+  inner_join(status5_6_after_status4_preliminary, by = "PX_ID") %>%
+  filter(CANHX_STAT_CD %in% c(2110, 2120, 2130, 2140)) %>%  # Status 1, 2, 3, or 4
+  filter(CANHX_BEGIN_DT > status5_6_date) %>%  # After Status 5/6
+  group_by(PX_ID) %>%
+  arrange(CANHX_BEGIN_DT) %>%
+  slice(1) %>%
+  ungroup() %>%
+  select(PX_ID, 
+         returned_to_status_date = CANHX_BEGIN_DT, 
+         returned_to_status_code = CANHX_STAT_CD,
+         Reason_For_Status)
+
+cat("Of those, returned to Status 4+ after Status 5/6:", nrow(returned_to_status4plus_after_5_6), "\n")
+
+# Final Status 5/6 censoring: Only those who did NOT return to Status 4+
+status5_6_after_status4 <- status5_6_after_status4_preliminary %>%
+  anti_join(returned_to_status4plus_after_5_6, by = "PX_ID")
+
+cat("Patients to censor at Status 5/6 (did NOT return to Status 4+):", nrow(status5_6_after_status4), "\n")
+
+# Create detailed summary
+status5_6_summary <- status5_6_after_status4_preliminary %>%
+  left_join(returned_to_status4plus_after_5_6, by = "PX_ID") %>%
+  mutate(
+    returned_to_status4plus = !is.na(returned_to_status_date),
+    days_until_return = if_else(
+      returned_to_status4plus,
+      as.numeric(difftime(returned_to_status_date, status5_6_date, units = "days")),
+      NA_real_
+    ),
+    returned_to_status_label = case_when(
+      is.na(returned_to_status_code) ~ "Did not return",
+      returned_to_status_code == 2110 ~ "Status 1",
+      returned_to_status_code == 2120 ~ "Status 2",
+      returned_to_status_code == 2130 ~ "Status 3",
+      returned_to_status_code == 2140 ~ "Status 4",
+      TRUE ~ "Other"
+    )
+  )
+
+cat("\n=== STATUS 5/6 TRANSITION SUMMARY ===\n")
+cat("Total who reached Status 5/6 after Status 4:", nrow(status5_6_summary), "\n")
+cat("Returned to Status 4+:", sum(status5_6_summary$returned_to_status4plus), 
+    sprintf("(%.1f%%)", mean(status5_6_summary$returned_to_status4plus)*100), "\n")
+cat("Did NOT return (censored):", sum(!status5_6_summary$returned_to_status4plus),
+    sprintf("(%.1f%%)", mean(!status5_6_summary$returned_to_status4plus)*100), "\n")
+
+if(sum(status5_6_summary$returned_to_status4plus) > 0) {
+  cat("\nAmong those who returned to Status 4+:\n")
+  cat("Median time to return:", 
+      round(median(status5_6_summary$days_until_return, na.rm = TRUE), 0), 
+      "days\n")
+  cat("IQR:", 
+      round(quantile(status5_6_summary$days_until_return, 0.25, na.rm = TRUE), 0), "-",
+      round(quantile(status5_6_summary$days_until_return, 0.75, na.rm = TRUE), 0), 
+      "days\n")
+  
+  cat("\nStatus returned to:\n")
+  return_status_table <- table(status5_6_summary$returned_to_status_label)
+  print(return_status_table)
+}
+
+
+
+
+
+
+# ============================================================================
+# INTEGRATE STATUS 5/6 CENSORING - EXCLUDE OBSERVATIONS AFTER CENSORING
+# ============================================================================
+
+# First, add Status 5/6 censoring dates to the dataset
+lvad_hx_with_complications <- lvad_hx_with_complications %>%
+  left_join(
+    status5_6_after_status4 %>% 
+      select(PX_ID, status5_6_date, status5_6_code),
+    by = "PX_ID"
+  ) %>%
+  # Filter out observations that occur AFTER Status 5/6 censoring date
+  filter(
+    is.na(status5_6_date) |  # Keep all if not censored at Status 5/6
+    CANHX_BEGIN_DT <= status5_6_date  # If censored, only keep episodes at/before censoring date
+  ) %>%
+  # Create censoring flags and dates
+  mutate(
+    # Flag for patients who should be censored at Status 5/6
+    censored_at_status5_6 = !is.na(status5_6_date),
+    
+    # Determine effective follow-up end date
+    last_followup = pmax(CAN_LAST_ACT_STAT_DT, CAN_LAST_INACT_STAT_DT, na.rm = TRUE),
+    
+    effective_followup_end = case_when(
+      # If censored at Status 5/6, use that date
+      !is.na(status5_6_date) ~ status5_6_date,
+      # If removed (and not censored at 5/6), use removal date
+      !is.na(CAN_REM_DT) ~ CAN_REM_DT,
+      # If neither removed nor censored, use last follow-up
+      TRUE ~ last_followup
+    ),
+    
+    # Event type indicator for survival analysis
+    event_type = case_when(
+      censored_at_status5_6 ~ "Censored at Status 5/6",
+      !is.na(CAN_REM_DT) & CAN_REM_CD == 4 ~ "Transplant",
+      !is.na(CAN_REM_DT) & CAN_REM_CD %in% c(8, 13) ~ "Death/Deterioration",
+      !is.na(CAN_REM_DT) & CAN_REM_CD == 12 ~ "Too Well",
+      !is.na(CAN_REM_DT) ~ "Other Removal",
+      TRUE ~ "Ongoing on Waitlist"
+    ),
+    
+    # Time from LVAD to effective follow-up end (in days)
+    time_from_lvad_to_end = as.numeric(difftime(effective_followup_end, durable_lvad_date, units = "days")),
+    time_from_lvad_to_end_years = time_from_lvad_to_end / 365.25
+  )
+
+# Summary of censoring integration
+cat("\n=== STATUS 5/6 CENSORING INTEGRATION SUMMARY ===\n")
+cat("Total episodes after filtering:", nrow(lvad_hx_with_complications), "\n")
+cat("Total unique patients:", n_distinct(lvad_hx_with_complications$PX_ID), "\n")
+
+# Patient-level summary
+patient_summary <- lvad_hx_with_complications %>%
+  group_by(PX_ID) %>%
+  slice(1) %>%
+  ungroup()
+
+cat("Censored at Status 5/6:", sum(patient_summary$censored_at_status5_6, na.rm = TRUE), "\n\n")
+
+cat("Event type distribution:\n")
+event_summary <- patient_summary %>%
+  count(event_type) %>%
+  mutate(pct = sprintf("%.1f%%", 100 * n / sum(n)))
+print(event_summary)
+
+cat("\nMedian follow-up time from LVAD (years):\n")
+followup_summary <- patient_summary %>%
+  summarize(
+    median = median(time_from_lvad_to_end_years, na.rm = TRUE),
+    q25 = quantile(time_from_lvad_to_end_years, 0.25, na.rm = TRUE),
+    q75 = quantile(time_from_lvad_to_end_years, 0.75, na.rm = TRUE)
+  )
+print(followup_summary)
+
+
+
+# Get patient-level follow-up data (one row per patient)
+followup_by_device <- lvad_hx_with_complications %>%
+  group_by(PX_ID) %>%
+  slice(1) %>%  # Take first row per patient
+  ungroup() %>%
+  mutate(
+    new_device_type = ifelse(device_type == "HeartMate 3", "HeartMate 3", "Other")
+  )
+
+# Summary statistics by device type
+cat("=== FOLLOW-UP TIME BY DEVICE TYPE ===\n\n")
+
+followup_summary <- followup_by_device %>%
+  group_by(new_device_type) %>%
+  summarize(
+    n = n(),
+    median_years = round(median(time_from_lvad_to_end_years, na.rm = TRUE), 2),
+    mean_years = round(mean(time_from_lvad_to_end_years, na.rm = TRUE), 2),
+    q25 = round(quantile(time_from_lvad_to_end_years, 0.25, na.rm = TRUE), 2),
+    q75 = round(quantile(time_from_lvad_to_end_years, 0.75, na.rm = TRUE), 2),
+    min_years = round(min(time_from_lvad_to_end_years, na.rm = TRUE), 2),
+    max_years = round(max(time_from_lvad_to_end_years, na.rm = TRUE), 2),
+    .groups = "drop"
+  )
+
+print(followup_summary)
+
+# Statistical test - Kruskal-Wallis (non-parametric ANOVA)
+cat("\n=== KRUSKAL-WALLIS TEST ===\n")
+kw_test <- kruskal.test(time_from_lvad_to_end_years ~ new_device_type, 
+                        data = followup_by_device)
+print(kw_test)
+
+
+# Get patient-level data with combined censoring
+patients_at_6yrs <- lvad_hx_with_complications %>%
+  group_by(PX_ID) %>%
+  slice(1) %>%
+  ungroup() %>%
+  mutate(
+    # Classify outcome at 6 years
+    status_at_6yrs = case_when(
+      # Event occurred before 6 years
+      time_from_lvad_to_end_years < 6 & event_type == "Transplant" ~ "Transplanted before 6 years",
+      time_from_lvad_to_end_years < 6 & event_type == "Death/Deterioration" ~ "Died/Deteriorated before 6 years",
+      time_from_lvad_to_end_years < 6 & event_type %in% c("Too Well", "Other Removal") ~ "Delisted before 6 years",
+      time_from_lvad_to_end_years < 6 & event_type %in% c("Censored at Status 5/6", "Ongoing on Waitlist") ~ "Censored before 6 years",
+      
+      # Followed at least 6 years
+      time_from_lvad_to_end_years >= 6 & event_type == "Transplant" ~ "Transplanted at 6+ years",
+      time_from_lvad_to_end_years >= 6 & event_type == "Death/Deterioration" ~ "Died/Deteriorated at 6+ years",
+      time_from_lvad_to_end_years >= 6 & event_type %in% c("Too Well", "Other Removal") ~ "Delisted at 6+ years",
+      time_from_lvad_to_end_years >= 6 & event_type %in% c("Censored at Status 5/6", "Ongoing on Waitlist") ~ "Censored at 6+ years",
+      
+      TRUE ~ "Other"
+    )
+  )
+
+table(patients_at_6yrs$CAN_REM_CD)
+
+
+# Summary of outcomes at 6 years
+cat("=== PATIENT OUTCOMES AT 6 YEARS FROM LVAD IMPLANT ===\n\n")
+cat("Total patients:", nrow(patients_at_6yrs), "\n\n")
+
+# Detailed breakdown
+outcome_summary <- patients_at_6yrs %>%
+  count(status_at_6yrs) %>%
+  mutate(pct = sprintf("%.1f%%", 100 * n / sum(n))) %>%
+  arrange(desc(n))
+
+print(outcome_summary)
+
+# Simplified summary - before vs at/after 6 years
+cat("\n=== SIMPLIFIED SUMMARY ===\n")
+simplified <- patients_at_6yrs %>%
+  mutate(
+    outcome_simple = case_when(
+      grepl("Transplanted", status_at_6yrs) ~ "Transplanted",
+      grepl("Died/Deteriorated", status_at_6yrs) ~ "Died/Deteriorated",
+      grepl("Delisted", status_at_6yrs) ~ "Delisted",
+      grepl("Censored", status_at_6yrs) ~ "Censored",
+      TRUE ~ "Other"
+    ),
+    timing = case_when(
+      grepl("before 6 years", status_at_6yrs) ~ "Before 6 years",
+      grepl("at 6\\+ years", status_at_6yrs) ~ "At/After 6 years",
+      TRUE ~ NA_character_
+    )
+  )
+
+simplified_table <- simplified %>%
+  count(outcome_simple, timing) %>%
+  pivot_wider(names_from = timing, values_from = n, values_fill = 0) %>%
+  mutate(Total = `Before 6 years` + `At/After 6 years`)
+
+print(simplified_table)
+
+# Follow-up duration summary
+cat("\n=== FOLLOW-UP DURATION ===\n")
+cat("Patients with <6 years follow-up:", 
+    sum(patients_at_6yrs$time_from_lvad_to_end_years < 6),
+    sprintf("(%.1f%%)\n", 100 * mean(patients_at_6yrs$time_from_lvad_to_end_years < 6)))
+cat("Patients with ≥6 years follow-up:", 
+    sum(patients_at_6yrs$time_from_lvad_to_end_years >= 6),
+    sprintf("(%.1f%%)\n", 100 * mean(patients_at_6yrs$time_from_lvad_to_end_years >= 6)))
+
+cat("\nMedian follow-up time (years):", 
+    round(median(patients_at_6yrs$time_from_lvad_to_end_years, na.rm = TRUE), 2), "\n")
+cat("IQR:", 
+    round(quantile(patients_at_6yrs$time_from_lvad_to_end_years, 0.25, na.rm = TRUE), 2), "-",
+    round(quantile(patients_at_6yrs$time_from_lvad_to_end_years, 0.75, na.rm = TRUE), 2), "\n")
+
+
+
+
+
+
+
+
+```
+
+
+``` {r complications}
+
+complications = lvad_hx_with_complications %>% filter(!is.na(Reason_For_Status) & Reason_For_Status != "Discretionary 30 Days with LVAD, Status 3")
+
+complications <- complications %>%
+  mutate(
+    complication_category = case_when(
+      # Status 4 = Durable LVAD (no complication)
+      CANHX_STAT_CD == 2140 ~ "Durable LVAD",
+      
+      # Section A: Objective LVAD-Related Complications
+      grepl("Life Threatening Ventricular Arrhythmia|Device Malfunction|Recurrent|VT/VF|Device Infection|Aortic Insufficiency|Hemolysis|Mucosal Bleeding|Pump Thrombosis|Right Heart Failure|VF", 
+            Reason_For_Status, ignore.case = TRUE) ~ 
+        "Objective LVAD Complications",
+      
+      # Section C: Exception-Related Justifications
+      grepl("Exception", Reason_For_Status, ignore.case = TRUE) ~ 
+        "Exception",
+      
+      # Section B: Additional Hemodynamic or Mechanical Support
+      grepl("ECMO|BIVAD|Bi-VAD|BiVAD|IABP|Non-Dischargeable|PEVAD|TAH|RVAD|Single Ventricle|Inotropes|Inotrope", 
+            Reason_For_Status, ignore.case = TRUE) ~ 
+        "Additional Hemodynamic/MCS Support",
+      
+      # Catch-all for anything else
+      TRUE ~ "Other"
+    ),
+    
+    # Add status label for convenience
+    status_label = case_when(
+      CANHX_STAT_CD == 2110 ~ "Status 1",
+      CANHX_STAT_CD == 2120 ~ "Status 2",
+      CANHX_STAT_CD == 2130 ~ "Status 3",
+      CANHX_STAT_CD == 2140 ~ "Status 4",
+      CANHX_STAT_CD == 2150 ~ "Status 5",
+      CANHX_STAT_CD == 2160 ~ "Status 6",
+      TRUE ~ "Unknown"
+    )
+  )
+
+# Summary of complication categories
+cat("\n=== COMPLICATION CATEGORY DISTRIBUTION ===\n")
+cat("Total complication episodes:", nrow(complications), "\n\n")
+
+complication_summary <- complications %>%
+  count(complication_category, sort = TRUE) %>%
+  mutate(pct = sprintf("%.1f%%", 100 * n / sum(n)))
+
+print(complication_summary)
+
+complication_device = complications %>%
+  count(device_type, sort = TRUE) %>%
+  mutate(pct = sprintf("%.1f%%", 100 * n / sum(n)))
+
+# By status
+cat("\n=== COMPLICATION CATEGORIES BY STATUS ===\n")
+complication_by_status <- complications %>%
+  count(status_label, complication_category) %>%
+  group_by(status_label) %>%
+  mutate(pct = sprintf("%.1f%%", 100 * n / sum(n))) %>%
+  arrange(status_label, desc(n))
+
+print(complication_by_status)
+
+
+# Prepare data with device type labels
+complications_for_table <- complications %>%
+  mutate(
+    # Clean reason - remove status info except for exceptions
+    reason_clean = case_when(
+      grepl("Exception", Reason_For_Status) ~ "Exception",  # Consolidate all exceptions
+      TRUE ~ gsub(", Status [0-9]", "", Reason_For_Status)
+    ),
+    # Further clean up timing phrases
+    reason_clean = gsub(" after [0-9]+ Days", "", reason_clean),
+    reason_clean = gsub(" after [0-9]+ Weeks", "", reason_clean),
+    
+    # Extract status number for exceptions
+    status_num = case_when(
+      grepl("Status 1", Reason_For_Status) ~ "Status 1",
+      grepl("Status 2", Reason_For_Status) ~ "Status 2",
+      grepl("Status 3", Reason_For_Status) ~ "Status 3",
+      TRUE ~ NA_character_
+    ),
+    
+    # Rename device types for table
+    device_type_label = case_when(
+      device_type == "hm3" | device_type == "HeartMate 3" ~ "HeartMate 3",
+      device_type == "hvad" | device_type == "Heartware HVAD" ~ "HVAD",
+      device_type == "other" | device_type == "Other" ~ "Other Durable LVAD",
+      TRUE ~ as.character(device_type)
+    ),
+    device_type_label = factor(device_type_label, levels = c("HeartMate 3", "HVAD", "Other Durable LVAD"))
+  )
+
+# Main table
+main_table <- complications_for_table %>%
+  filter(reason_clean != "Exception") %>%
+  select(complication_category, reason_clean, device_type_label) %>%
+  tbl_strata(
+    strata = complication_category,
+    .tbl_fun = ~.x %>%
+      tbl_summary(
+        by = device_type_label,
+        include = reason_clean,
+        label = list(reason_clean = " "),
+        digits = list(all_categorical() ~ c(0, 1))
+      ) %>%
+      add_p(test = all_categorical() ~ "fisher.test",
+            test.args = all_tests("fisher.test") ~ list(simulate.p.value = TRUE, B = 10000),
+            pvalue_fun = ~style_pvalue(.x, digits = 2)) %>%
+      add_overall(),
+    .header = "**{strata}**, N = {n}"
+  )
+
+# Exception table with status breakdown
+exception_table <- complications_for_table %>%
+  filter(reason_clean == "Exception") %>%
+  select(status_num, device_type_label) %>%
+  tbl_summary(
+    by = device_type_label,
+    include = status_num,
+    label = list(status_num = "Exception"),
+    digits = list(all_categorical() ~ c(0, 1))
+  ) %>%
+  add_p(test = all_categorical() ~ "fisher.test",
+        test.args = all_tests("fisher.test") ~ list(simulate.p.value = TRUE, B = 10000),
+        pvalue_fun = ~style_pvalue(.x, digits = 2)) %>%
+  add_overall() %>%
+  modify_header(label = "**Exception**, N = {N}")
+
+# Combine tables
+tbl_stack(list(main_table, exception_table)) %>%
+  as_gt() %>%
+  gt::tab_header(
+    title = "Durable LVAD Complications or Status Upgrades During Listing",
+    subtitle = "Stratified by Type of Device"
+  )
+
+
+
+
+# Calculate time from LVAD implant to complication
+complications_with_time <- complications %>%
+  mutate(
+    time_to_complication_days = as.numeric(difftime(CANHX_BEGIN_DT, durable_lvad_date, units = "days")),
+    time_to_complication_years = time_to_complication_days / 365.25,
+    before_6_years = time_to_complication_years < 6
+  )
+
+# Summary statistics
+cat("=== TIME FROM LVAD IMPLANT TO COMPLICATION ===\n\n")
+
+cat("Total complications:", nrow(complications_with_time), "\n")
+cat("Complications before 6 years:", sum(complications_with_time$before_6_years, na.rm = TRUE), 
+    sprintf("(%.1f%%)", 100 * mean(complications_with_time$before_6_years, na.rm = TRUE)), "\n")
+cat("Complications at/after 6 years:", sum(!complications_with_time$before_6_years, na.rm = TRUE),
+    sprintf("(%.1f%%)", 100 * mean(!complications_with_time$before_6_years, na.rm = TRUE)), "\n\n")
+
+cat("Time to complication (years):\n")
+cat("  Median:", round(median(complications_with_time$time_to_complication_days, na.rm = TRUE), 2), "\n")
+cat("  Mean:", round(mean(complications_with_time$time_to_complication_days, na.rm = TRUE), 2), "\n")
+cat("  IQR:", round(quantile(complications_with_time$time_to_complication_days, 0.25, na.rm = TRUE), 2), "-",
+    round(quantile(complications_with_time$time_to_complication_days, 0.75, na.rm = TRUE), 2), "\n")
+cat("  Range:", round(min(complications_with_time$time_to_complication_days, na.rm = TRUE), 2), "-",
+    round(max(complications_with_time$time_to_complication_days, na.rm = TRUE), 2), "\n\n")
+
+
+
+
+
+
+
+# Percentage of complications that were exceptions, by status
+exception_by_status <- complications %>%
+  filter(status_label %in% c("Status 1", "Status 2", "Status 3")) %>%
+  group_by(status_label) %>%
+  summarize(
+    total = n(),
+    exceptions = sum(complication_category == "Exception"),
+    non_exceptions = sum(complication_category != "Exception"),
+    pct_exceptions = sprintf("%.1f%%", 100 * exceptions / total),
+    .groups = "drop"
+  )
+
+cat("=== EXCEPTIONS AS PERCENTAGE OF COMPLICATIONS BY STATUS ===\n\n")
+print(exception_by_status)
+
+
+
+
+# Breakdown of complications by status
+complications_by_status <- complications %>%
+  count(status_label) %>%
+  mutate(pct = sprintf("%.1f%%", 100 * n / sum(n)))
+
+cat("=== COMPLICATIONS BY STATUS ===\n")
+print(complications_by_status)
+
+# Breakdown by status and complication category
+complications_by_status_category <- complications %>%
+  count(status_label, Reason_For_Status) %>%
+  group_by(status_label) %>%
+  mutate(
+    total_status = sum(n),
+    pct_within_status = sprintf("%.1f%%", 100 * n / total_status)
+  ) %>%
+  ungroup() %>%
+  arrange(status_label, desc(n))
+
+cat("\n=== COMPLICATIONS BY STATUS AND CATEGORY ===\n")
+print(complications_by_status_category)
+
+# Summary table
+cat("\n=== SUMMARY TABLE ===\n")
+summary_table <- complications %>%
+  count(status_label, complication_category) %>%
+  pivot_wider(names_from = complication_category, values_from = n, values_fill = 0) %>%
+  mutate(Total = rowSums(across(where(is.numeric))))
+
+print(summary_table)
+
+
+
+
+
+
+# Number of unique patients with complications
+unique_patients_with_complications <- n_distinct(complications$PX_ID)
+cat("Unique patients with complications:", unique_patients_with_complications, "\n\n")
+
+# Complications per patient
+complications_per_patient <- complications %>%
+  group_by(PX_ID) %>%
+  summarize(
+    n_complications = n(),
+    .groups = "drop"
+  )
+
+# Summary statistics
+cat("=== COMPLICATIONS PER PATIENT ===\n")
+cat("Median complications per patient:", median(complications_per_patient$n_complications), "\n")
+cat("Mean complications per patient:", round(mean(complications_per_patient$n_complications), 2), "\n")
+cat("IQR:", quantile(complications_per_patient$n_complications, 0.25), "-", 
+    quantile(complications_per_patient$n_complications, 0.75), "\n")
+cat("Range:", min(complications_per_patient$n_complications), "-", 
+    max(complications_per_patient$n_complications), "\n\n")
+
+# Distribution
+cat("Distribution of complications per patient:\n")
+complication_dist <- complications_per_patient %>%
+  count(n_complications) %>%
+  mutate(pct = sprintf("%.1f%%", 100 * n / sum(n)))
+print(complication_dist)
+
+# Histogram
+hist(complications_per_patient$n_complications, 
+     breaks = 20,
+     main = "Distribution of Complications per Patient",
+     xlab = "Number of Complications",
+     ylab = "Number of Patients",
+     col = "steelblue")
+
+```
+
+
+``` {r table 1}
+
+fortable1 = lvad_patient_list %>%
+  mutate(
+    sex = ifelse(CAN_GENDER == "M", "Male", "Female"),
+    sex = factor(sex, levels = c("Male", "Female")),
+    race = case_when(
+      is.na(CAN_RACE) & CAN_ETHNICITY_SRTR == "LATINO" ~ "Hispanic/Latino",
+      CAN_RACE == 8 & CAN_ETHNICITY_SRTR == "NLATIN" ~ "White",
+      CAN_RACE == 16 & CAN_ETHNICITY_SRTR == "NLATIN" ~ "Black",
+      CAN_RACE == 64 & CAN_ETHNICITY_SRTR == "NLATIN" ~ "Asian",
+      TRUE ~ "Other"),
+    race = factor(race, levels = c("White", "Black", "Hispanic/Latino", "Asian", "Other")),
+    age_at_listing = floor(CAN_AGE_IN_MONTHS_AT_LISTING / 12),
+    bmi_categories = case_when(
+      CAN_BMI < 18 ~ "Underweight",
+      CAN_BMI >= 18 & CAN_BMI < 25 ~ "Normal",
+      CAN_BMI >= 25 & CAN_BMI < 30 ~ "Overweight",
+      CAN_BMI >= 30 ~ "Obese",
+      TRUE ~ "Unknown"),
+    bmi_categories = factor(bmi_categories, levels = c("Normal", "Underweight", "Overweight", "Obese", "Unknown")),
+    blood_type = factor(
+      case_when(
+        CAN_ABO %in% c("A", "A1", "A2") ~ "A",
+        CAN_ABO %in% c("A1B", "A2B") ~ "AB",
+        TRUE ~ CAN_ABO)),
+    diagnosis = case_when(
+      CAN_DGN > 999 & CAN_DGN < 1007 ~ "Dilated Cardiomyopathy, Non-Ischemic",
+      CAN_DGN == 1007 | CAN_DGN == 1200 ~ "Ischemic Cardiomyopathy",
+      TRUE ~ "Other"),
+    diagnosis = factor(diagnosis, levels = c("Dilated Cardiomyopathy, Non-Ischemic", "Ischemic Cardiomyopathy", "Other")),
+    payor = case_when(
+      CAN_PRIMARY_PAY %in% c(2, 3, 4, 5, 6, 7, 13) ~ "Public",
+      CAN_PRIMARY_PAY == 1 ~ "Private",
+      TRUE ~ "Other"),
+    payor = factor(payor, levels = c("Private", "Public", "Other")),
+    lvad_type = case_when(
+      device_type == "HeartMate 3" ~ "HeartMate 3",
+      TRUE ~ "Other"),
+    lvad_type = factor(lvad_type, levels = c("HeartMate 3", "Other")))
+
+var_label_list <- list(age_at_listing = "Age at Listing (Years)",
+                       sex = "Sex",
+                       race = "Race",
+                       bmi_categories = "BMI",
+                       blood_type = "Blood Type",
+                       diagnosis = "Primary Diagnosis",
+                       payor = "Insurance Type",
+                       lvad_type = "Device Type")
+
+labelled::var_label(fortable1) <- var_label_list
+
+fortable1 %>% ungroup() %>%
+  dplyr::select(
+    age_at_listing, sex, race, bmi_categories, blood_type, diagnosis, payor, lvad_type) %>%
+  tbl_summary(by = lvad_type, digits = list(all_categorical() ~ c(0, 1))) %>%
+  add_p(test.args = all_tests("chisq.test") ~ list(workspace=2e7)) %>%
+  add_overall() %>% 
+  as_gt()
+
+
+# Detailed LVAD type breakdown table
+lvad_types = fortable1 %>% 
+  mutate(
+    # Create detailed LVAD categories from device_type
+    detailed_lvad = case_when(
+      VadBrandId == 205 ~ "HeartMate II",
+      VadBrandId == 209 ~ "Heartsaver VAD",
+      VadBrandId == 223 ~ "Evaheart",
+      VadBrandId == 224 | device_type == "Heartware HVAD" ~ "Heartware HVAD",
+      VadBrandId == 233 ~ "Worldheart Levacor",
+      VadBrandId == 236 | device_type == "HeartMate 3" ~ "HeartMate 3",
+      VadBrandId == 999 & OtherSpecify == "NuPulse iVAS" ~ "NuPulseCV iVAS",
+      TRUE ~ "Other"
+    ),
+    detailed_lvad = factor(detailed_lvad, 
+                          levels = c("HeartMate 3", "Heartware HVAD", "HeartMate II", "Evaheart", "Worldheart Levacor", "NuPulseCV iVAS", "Other"))
+  )
+
+lvad_types %>% ungroup() %>%
+  dplyr::select(detailed_lvad) %>%
+  tbl_summary(digits = list(all_categorical() ~ c(0, 1))) %>%
+  add_overall() %>% 
+  as_gt()
+
+```

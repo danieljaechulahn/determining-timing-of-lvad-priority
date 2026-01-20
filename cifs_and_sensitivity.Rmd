@@ -1,0 +1,1437 @@
+---
+title: "Untitled"
+output: html_document
+date: "2026-01-20"
+---
+
+``` {r outcomes}
+# ============================================================================
+# STEP 6: CREATE COHORT WITH ALL OUTCOMES
+# ============================================================================
+
+cohort_with_outcomes <- lvad_patient_list %>%
+  left_join(first_complication, by = "PX_ID") %>%
+  left_join(status5_6_after_status4, by = "PX_ID") %>%
+  mutate(
+    # Calculate last follow-up date if still on waitlist
+    last_followup_date = pmax(CAN_LAST_ACT_STAT_DT, CAN_LAST_INACT_STAT_DT, na.rm = TRUE),
+    
+    # Determine end date based on removal status
+    end_date_uncensored = if_else(
+      is.na(CAN_REM_DT),
+      last_followup_date,
+      CAN_REM_DT
+    ),
+    
+    # Apply Status 5/6 censoring (only if Status 4 was reached first)
+    end_date = if_else(
+      !is.na(status5_6_date) & status5_6_date < end_date_uncensored,
+      status5_6_date,
+      end_date_uncensored
+    ),
+    
+    # Indicator for Status 5/6 censoring
+    censored_at_status5_6 = !is.na(status5_6_date) & status5_6_date == end_date,
+    
+    # Calculate follow-up time
+    followup_days = as.numeric(difftime(end_date, durable_lvad_date, units = "days")),
+    followup_years = followup_days / 365.25,
+    
+    # Calculate time to complication
+    time_to_complication_days = as.numeric(difftime(complication_date, durable_lvad_date, units = "days")),
+    time_to_complication_years = time_to_complication_days / 365.25,
+    
+    # Define competing events
+    transplanted = !is.na(CAN_REM_DT) & CAN_REM_CD == 4,
+    died = !is.na(CAN_REM_DT) & CAN_REM_CD %in% c(8, 13),
+    removed_other = !is.na(CAN_REM_DT) & !CAN_REM_CD %in% c(4, 8, 13),
+    
+    # Time to competing events
+    time_to_transplant_years = if_else(
+      transplanted,
+      as.numeric(difftime(CAN_REM_DT, durable_lvad_date, units = "days")) / 365.25,
+      NA_real_
+    ),
+    time_to_death_years = if_else(
+      died,
+      as.numeric(difftime(CAN_REM_DT, durable_lvad_date, units = "days")) / 365.25,
+      NA_real_
+    ),
+    
+    # Define event type for competing risk analysis
+    # 0 = censored, 1 = complication, 2 = transplant, 3 = death, 4 = other removal
+    event_type = case_when(
+      # Complication occurred before end date
+      !is.na(complication_date) & complication_date <= end_date ~ 1L,
+      # Transplanted (and no prior complication)
+      transplanted & (is.na(complication_date) | CAN_REM_DT < complication_date) ~ 2L,
+      # Died (and no prior complication)
+      died & (is.na(complication_date) | CAN_REM_DT < complication_date) ~ 3L,
+      # Other removal (and no prior complication)
+      removed_other & (is.na(complication_date) | CAN_REM_DT < complication_date) ~ 4L,
+      # Censored (still waiting or Status 5/6)
+      TRUE ~ 0L
+    ),
+    
+    # Time to event (earliest of complication or competing event)
+    time_to_event_years = case_when(
+      event_type == 1 ~ time_to_complication_years,
+      event_type == 2 ~ time_to_transplant_years,
+      event_type == 3 ~ time_to_death_years,
+      event_type == 4 ~ as.numeric(difftime(CAN_REM_DT, durable_lvad_date, units = "days")) / 365.25,
+      TRUE ~ followup_years
+    )
+  ) %>%
+  # Exclude if negative or zero follow-up
+  filter(followup_years > 0 & time_to_event_years > 0)
+
+# ============================================================================
+# STEP 7: SUMMARY STATISTICS
+# ============================================================================
+
+cat("\n=== COHORT SUMMARY ===\n")
+cat("Total patients:", nrow(cohort_with_outcomes), "\n")
+cat("Median follow-up:", round(median(cohort_with_outcomes$followup_years), 2), "years\n")
+cat("IQR follow-up:", round(quantile(cohort_with_outcomes$followup_years, 0.25), 2), "-",
+    round(quantile(cohort_with_outcomes$followup_years, 0.75), 2), "years\n")
+
+cat("\n=== EVENT SUMMARY ===\n")
+event_summary <- table(cohort_with_outcomes$event_type)
+names(event_summary) <- c("Censored", "Complication", "Transplant", "Death", "Other Removal")[
+  as.numeric(names(event_summary)) + 1]
+print(event_summary)
+cat("\nPercentages:\n")
+print(round(prop.table(event_summary) * 100, 1))
+
+cat("\nCensored at Status 5/6 (after Status 4):", sum(cohort_with_outcomes$censored_at_status5_6), "\n")
+
+# Device type summary
+cat("\n=== DEVICE TYPE SUMMARY ===\n")
+device_summary <- cohort_with_outcomes %>%
+  group_by(device_type) %>%
+  summarise(
+    n = n(),
+    median_followup = median(followup_years),
+    complications = sum(event_type == 1),
+    complication_rate = complications / n * 100,
+    transplanted = sum(event_type == 2),
+    died = sum(event_type == 3),
+    censored_status5_6 = sum(censored_at_status5_6)
+  )
+print(device_summary)
+
+
+
+
+
+
+
+# ============================================================================
+# 6-YEAR PERSISTENCE ANALYSIS
+# ============================================================================
+
+six_year_analysis <- cohort_with_outcomes %>%
+  mutate(
+    # Determine status at 6 years
+    reached_6_years = time_to_event_years >= 6,
+    
+    # For those who didn't reach 6 years, classify their outcome
+    outcome_before_6 = case_when(
+      time_to_event_years >= 6 ~ "Reached 6 years",
+      event_type == 0 ~ "Censored before 6 years",
+      event_type == 1 ~ "Complication before 6 years",
+      event_type == 2 ~ "Transplanted before 6 years",
+      event_type == 3 ~ "Died before 6 years",
+      event_type == 4 ~ "Other removal before 6 years",
+      TRUE ~ "Unknown"
+    ),
+    
+    # Simplify to delisted vs censored vs reached
+    status_at_6 = case_when(
+      time_to_event_years >= 6 ~ "Still on waitlist at 6 years",
+      event_type == 0 ~ "Censored before 6 years",
+      event_type %in% c(1, 2, 3, 4) ~ "Delisted before 6 years",
+      TRUE ~ "Unknown"
+    )
+  )
+
+cat("\n=== 6-YEAR PERSISTENCE ANALYSIS ===\n")
+cat(sprintf("Total patients: %d\n\n", nrow(six_year_analysis)))
+
+# Overall categories
+cat("Overall Status at 6 Years:\n")
+status_at_6_summary <- table(six_year_analysis$status_at_6)
+print(status_at_6_summary)
+cat("\nPercentages:\n")
+print(round(prop.table(status_at_6_summary) * 100, 2))
+
+# Detailed breakdown for those who didn't reach 6 years
+cat("\n\nDetailed Outcomes Before 6 Years:\n")
+outcome_before_6_summary <- table(six_year_analysis$outcome_before_6)
+print(outcome_before_6_summary)
+cat("\nPercentages:\n")
+print(round(prop.table(outcome_before_6_summary) * 100, 2))
+
+# Key statistics
+patients_delisted_before_6 <- sum(six_year_analysis$status_at_6 == "Delisted before 6 years")
+patients_censored_before_6 <- sum(six_year_analysis$status_at_6 == "Censored before 6 years")
+patients_at_6_years <- sum(six_year_analysis$status_at_6 == "Still on waitlist at 6 years")
+
+cat("\n\n=== KEY STATISTICS ===\n")
+cat(sprintf("Delisted before 6 years: %d (%.2f%%)\n", 
+            patients_delisted_before_6,
+            100 * patients_delisted_before_6 / nrow(six_year_analysis)))
+
+cat(sprintf("Censored before 6 years: %d (%.2f%%)\n", 
+            patients_censored_before_6,
+            100 * patients_censored_before_6 / nrow(six_year_analysis)))
+
+cat(sprintf("Still on waitlist at 6 years: %d (%.2f%%)\n", 
+            patients_at_6_years,
+            100 * patients_at_6_years / nrow(six_year_analysis)))
+
+cat(sprintf("\nExited before 6 years (delisted + censored): %d (%.2f%%)\n",
+            patients_delisted_before_6 + patients_censored_before_6,
+            100 * (patients_delisted_before_6 + patients_censored_before_6) / nrow(six_year_analysis)))
+
+# Break down the delisted group
+cat("\n\n=== DELISTED BEFORE 6 YEARS BREAKDOWN ===\n")
+delisted_breakdown <- six_year_analysis %>%
+  filter(status_at_6 == "Delisted before 6 years") %>%
+  mutate(
+    reason = case_when(
+      event_type == 1 ~ "Complication",
+      event_type == 2 ~ "Transplant",
+      event_type == 3 ~ "Death",
+      event_type == 4 ~ "Other removal"
+    )
+  ) %>%
+  count(reason) %>%
+  mutate(pct = 100 * n / sum(n))
+
+print(delisted_breakdown)
+
+# Time to events for those delisted before 6 years
+cat("\n\n=== TIME TO DELISTING (for those delisted before 6 years) ===\n")
+time_to_delist <- six_year_analysis %>%
+  filter(status_at_6 == "Delisted before 6 years")
+
+cat(sprintf("Median time to delisting: %.2f years (IQR: %.2f-%.2f)\n",
+            median(time_to_delist$time_to_event_years),
+            quantile(time_to_delist$time_to_event_years, 0.25),
+            quantile(time_to_delist$time_to_event_years, 0.75)))
+
+
+
+
+
+
+# ============================================================================
+# STEP 8: PREPARE DATA FOR CUMULATIVE INCIDENCE
+# ============================================================================
+
+# Prepare data with simplified device grouping and combined death/deterioration
+cif_data <- cohort_with_outcomes %>%
+  filter(!is.na(time_to_event_years) & time_to_event_years > 0) %>%
+  mutate(
+    # Simplify device type: HeartMate 3 vs Other
+    device_simple = if_else(device_type == "HeartMate 3", "HeartMate 3", "Other"),
+    
+    # Combine death and other removal into "Death/Deterioration"
+    event_label = factor(
+      case_when(
+        event_type == 0 ~ 0L,
+        event_type == 1 ~ 1L,
+        event_type == 2 ~ 2L,
+        event_type %in% c(3, 4) ~ 3L
+      ),
+      levels = c(0, 1, 2, 3),
+      labels = c("Censored", 
+                "Complication",
+                "Transplant",
+                "Death/Deterioration")
+    )
+  )
+
+# ============================================================================
+# STEP 9: OVERALL CUMULATIVE INCIDENCE PLOT
+# ============================================================================
+
+# Create survival object
+surv_overall <- survfit2(Surv(time_to_event_years, event_label) ~ 1, 
+                        data = cif_data)
+
+options("ggsurvfit.switch-color-linetype" = TRUE)
+
+
+# Plot with ggcuminc
+p_overall <- surv_overall %>%
+  ggcuminc(
+    outcome = c("Complication", "Transplant", "Death/Deterioration"),
+    linewidth = 1.2
+  ) + 
+  add_confidence_interval(alpha = 0.2) +
+  add_risktable(size = 5, 
+                theme = theme_risktable_default(plot.title.size = 14, 
+                                                axis.text.y.size = 14)) +
+  scale_x_continuous(breaks = 0:6, limits = c(0, 6)) +
+  scale_y_continuous(
+    limits = c(0, 1),
+    labels = scales::percent,
+    expand = c(0.01, 0)
+  ) +
+  #geom_vline(xintercept = 6, linetype = "dashed", color = "black", linewidth = 0.8) +
+  annotate("text", x = 6.1, y = 0.05, 
+           label = "OPTN Policy Threshold\n(6 Years)", 
+           hjust = 0, size = 4) +
+  xlab("Years after Durable LVAD Implantation") +
+  ylab("Cumulative Incidence") +
+  #ggtitle("Cumulative Incidence of Competing Outcomes After Durable LVAD",
+  #        subtitle = sprintf("N = %d patients, Median follow-up = %.1f years",
+  #                         nrow(cif_data),
+  #                         median(cif_data$followup_years))) +
+  scale_color_manual(values = c("Complication" = '#df8f44',
+                                "Transplant" = '#00a1d5', 
+                                "Death/Deterioration" = '#374e55')) +
+  scale_fill_manual(values = c("Complication" = '#df8f44',
+                              "Transplant" = '#00a1d5',
+                              "Death/Deterioration" = '#374e55')) +
+  theme_classic() +
+  theme(
+    plot.title = element_text(size = 16, face = "bold"),
+    plot.subtitle = element_text(size = 12, color = "gray30"),
+    legend.title = element_blank(),
+    legend.position = "bottom",
+    axis.text.x = element_text(size = 14),
+    axis.title.x = element_text(size = 14),
+    axis.text.y = element_text(size = 14),
+    axis.title.y = element_text(size = 14),
+    legend.text = element_text(size = 14)
+  )
+
+print(p_overall)
+
+
+# ============================================================================
+# STEP 10: BY DEVICE TYPE WITH FINE-GRAY P-VALUES
+# ============================================================================
+
+options("ggsurvfit.switch-color-linetype" = FALSE)
+
+# Create survival object by simplified device type
+surv_by_device <- survfit2(Surv(time_to_event_years, event_label) ~ device_simple,
+                           data = cif_data)
+
+# Calculate Fine-Gray p-values for each outcome
+cif_data_crr <- cif_data %>%
+  mutate(
+    event_type_combined = case_when(
+      event_type == 0 ~ 0L,
+      event_type == 1 ~ 1L,
+      event_type == 2 ~ 2L,
+      event_type %in% c(3, 4) ~ 3L
+    ),
+    device_other = as.numeric(device_simple == "Other")
+  )
+
+# Fine-Gray for Complication (event = 1)
+fg_complication <- cmprsk::crr(
+  ftime = cif_data_crr$time_to_event_years,
+  fstatus = cif_data_crr$event_type_combined,
+  cov1 = cbind(cif_data_crr$device_other),
+  failcode = 1,
+  cencode = 0
+)
+p_complication <- 2 * (1 - pnorm(abs(fg_complication$coef / sqrt(fg_complication$var))))
+p_complication_text <- ifelse(p_complication < 0.001, "< 0.001", sprintf("%.3f", p_complication))
+
+# Fine-Gray for Transplant (event = 2)
+fg_transplant <- cmprsk::crr(
+  ftime = cif_data_crr$time_to_event_years,
+  fstatus = cif_data_crr$event_type_combined,
+  cov1 = cbind(cif_data_crr$device_other),
+  failcode = 2,
+  cencode = 0
+)
+p_transplant <- 2 * (1 - pnorm(abs(fg_transplant$coef / sqrt(fg_transplant$var))))
+p_transplant_text <- ifelse(p_transplant < 0.001, "< 0.001", sprintf("%.3f", p_transplant))
+
+# Fine-Gray for Death/Deterioration (event = 3)
+fg_death <- cmprsk::crr(
+  ftime = cif_data_crr$time_to_event_years,
+  fstatus = cif_data_crr$event_type_combined,
+  cov1 = cbind(cif_data_crr$device_other),
+  failcode = 3,
+  cencode = 0
+)
+p_death <- 2 * (1 - pnorm(abs(fg_death$coef / sqrt(fg_death$var))))
+p_death_text <- ifelse(p_death < 0.001, "< 0.001", sprintf("%.3f", p_death))
+
+cat("\n=== FINE-GRAY P-VALUES (Other vs HeartMate 3) ===\n")
+cat("Complication:", p_complication_text, "\n")
+cat("Transplant:", p_transplant_text, "\n")
+cat("Death/Deterioration:", p_death_text, "\n")
+
+# Single combined plot with p-values
+# Turn ON color-linetype switching so linetype represents outcomes
+options("ggsurvfit.switch-color-linetype" = FALSE)
+
+p_by_device_combined <- surv_by_device %>%
+  ggcuminc(
+    outcome = c("Complication", "Transplant", "Death/Deterioration"),
+    linewidth = 1.2
+  ) +
+  add_confidence_interval(alpha = 0.2) +
+  add_risktable(size = 5,
+                theme = theme_risktable_default(plot.title.size = 15,
+                                                axis.text.y.size = 15)) +
+  scale_x_continuous(breaks = seq(0, 6, 1), limits = c(0, 6)) +
+  scale_y_continuous(
+    limits = c(0, 1),
+    labels = scales::percent,
+    expand = c(0.01, 0)
+  ) +
+  xlab("Years Since LVAD Implantation") +
+  ylab("Cumulative Incidence") +
+  #ggtitle("Cumulative Incidence by Device Type") +
+  scale_color_manual(values = c("HeartMate 3" = "#2E86AB",
+                                "Other" = "#F18F01"),
+                    name = "Device Type") +
+  scale_fill_manual(values = c("HeartMate 3" = "#2E86AB",
+                              "Other" = "#F18F01"),
+                   name = "Device Type") +
+  scale_linetype_manual(values = c("Complication" = "solid",
+                                   "Transplant" = "dashed",
+                                   "Death/Deterioration" = "dotted"),
+                       name = "Outcome") +
+  # Add p-value annotations
+  annotate("text", x = 0, y = 0.95, hjust = 0, size = 5,
+           label = paste0("Complication p: ", p_complication_text)) +
+  annotate("text", x = 0, y = 0.88, hjust = 0, size = 5,
+           label = paste0("Transplant p: ", p_transplant_text)) +
+  annotate("text", x = 0, y = 0.81, hjust = 0, size = 5,
+           label = paste0("Death/Deterioration p: ", p_death_text)) +
+  theme_classic() +
+  theme(
+    plot.title = element_text(size = 16, face = "bold"),
+    legend.title = element_blank(),
+    legend.position = "bottom",
+    axis.text.x = element_text(size = 15),
+    axis.title.x = element_text(size = 15),
+    axis.text.y = element_text(size = 15),
+    axis.title.y = element_text(size = 15),
+    legend.text = element_text(size = 15)
+  )
+
+print(p_by_device_combined)
+
+
+
+
+
+
+
+
+# ============================================================================
+# CUMULATIVE INCIDENCE AT 6 YEARS - COMPLETE EXTRACTION
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# PART 1: OVERALL CUMULATIVE INCIDENCE
+# ----------------------------------------------------------------------------
+
+cat("\n=== OVERALL CUMULATIVE INCIDENCE AT 6 YEARS ===\n")
+
+# Extract 6-year estimates from overall survfit object
+summary_6yr_overall <- summary(surv_overall, times = 6)
+
+# Get state names
+state_names_overall <- summary_6yr_overall$states
+
+# Extract estimates for each outcome
+overall_results <- list()
+
+for(i in 1:length(state_names_overall)) {
+  state <- state_names_overall[i]
+  
+  if(state != "(s0)") {  # Skip censored state
+    est <- summary_6yr_overall$pstate[i] * 100
+    lower <- summary_6yr_overall$lower[i] * 100
+    upper <- summary_6yr_overall$upper[i] * 100
+    
+    cat(sprintf("%s: %.1f%% (95%% CI: %.1f%%-%.1f%%)\n",
+                state, est, lower, upper))
+    
+    overall_results[[length(overall_results) + 1]] <- data.frame(
+      Outcome = state,
+      Estimate = est,
+      Lower_CI = lower,
+      Upper_CI = upper,
+      CI_text = sprintf("%.1f%% (%.1f%%-%.1f%%)", est, lower, upper)
+    )
+  }
+}
+
+# Combine into table
+overall_6yr_df <- bind_rows(overall_results)
+
+cat(sprintf("\nPatients at risk at 6 years: %d\n", summary_6yr_overall$n.risk[1]))
+
+
+
+# ----------------------------------------------------------------------------
+# PART 2: OVERALL CUMULATIVE INCIDENCE AT MULTIPLE TIME POINTS
+# ----------------------------------------------------------------------------
+
+cat("\n=== OVERALL CUMULATIVE INCIDENCE AT MULTIPLE TIME POINTS ===\n")
+
+timepoints <- c(1, 2, 3, 4, 5, 6)
+overall_multitime_results <- list()
+
+for(time in timepoints) {
+  summary_t <- summary(surv_overall, times = time)
+  
+  for(i in 1:length(summary_t$states)) {
+    state <- summary_t$states[i]
+    
+    if(state != "(s0)") {
+      est <- summary_t$pstate[i] * 100
+      lower <- summary_t$lower[i] * 100
+      upper <- summary_t$upper[i] * 100
+      at_risk <- summary_t$n.risk[1]
+      
+      overall_multitime_results[[length(overall_multitime_results) + 1]] <- data.frame(
+        Time = time,
+        Outcome = state,
+        Estimate = est,
+        Lower_CI = lower,
+        Upper_CI = upper,
+        At_Risk = at_risk,
+        CI_text = sprintf("%.1f%% (%.1f%%-%.1f%%)", est, lower, upper)
+      )
+    }
+  }
+}
+
+overall_multitime_df <- bind_rows(overall_multitime_results)
+
+# Wide format for easy reading
+overall_multitime_wide <- overall_multitime_df %>%
+  select(Time, Outcome, Estimate) %>%
+  pivot_wider(names_from = Time, values_from = Estimate, names_prefix = "Year_")
+
+cat("\nCumulative Incidence Over Time (%):\n")
+print(overall_multitime_wide)
+
+
+
+# ============================================================================
+# PART 3: BY DEVICE TYPE - CORRECT MATRIX EXTRACTION
+# ============================================================================
+
+cat("\n\n=== CUMULATIVE INCIDENCE AT 6 YEARS BY DEVICE TYPE ===\n")
+
+# Extract 6-year estimates from device survfit object
+summary_6yr_device <- summary(surv_by_device, times = 6)
+
+# Get device names from strata levels
+device_names <- gsub("device_simple=", "", levels(summary_6yr_device$strata))
+state_names <- summary_6yr_device$states
+
+cat("\nDevices:", paste(device_names, collapse=", "), "\n")
+cat("States:", paste(state_names, collapse=", "), "\n")
+
+# Extract cumulative incidence - pstate/lower/upper are MATRICES (n_devices x n_states)
+device_results <- list()
+
+for(device_idx in 1:length(device_names)) {
+  device <- device_names[device_idx]
+  
+  cat(sprintf("\n%s (N at risk = %d):\n", device, summary_6yr_device$n.risk[device_idx, 1]))
+  
+  for(state_idx in 1:length(state_names)) {
+    state <- state_names[state_idx]
+    
+    if(state != "(s0)") {  # Skip censored state
+      # Access matrix elements [device_row, state_col]
+      est <- summary_6yr_device$pstate[device_idx, state_idx] * 100
+      lower <- summary_6yr_device$lower[device_idx, state_idx] * 100
+      upper <- summary_6yr_device$upper[device_idx, state_idx] * 100
+      
+      cat(sprintf("  %s: %.1f%% (95%% CI: %.1f%%-%.1f%%)\n",
+                  state, est, lower, upper))
+      
+      new_row <- data.frame(
+        Device = device,
+        Outcome = state,
+        Estimate = est,
+        Lower_CI = lower,
+        Upper_CI = upper,
+        CI_text = sprintf("%.1f%% (%.1f%%-%.1f%%)", est, lower, upper),
+        stringsAsFactors = FALSE
+      )
+      
+      device_results[[length(device_results) + 1]] <- new_row
+    }
+  }
+}
+
+# Combine into table
+device_6yr_df <- bind_rows(device_results)
+
+cat("\n=== EXTRACTED DATA ===\n")
+print(device_6yr_df)
+
+# Create comparison table (wide format)
+comparison_table <- device_6yr_df %>%
+  select(Device, Outcome, CI_text) %>%
+  pivot_wider(names_from = Device, values_from = CI_text) %>%
+  mutate(
+    `P-value` = case_when(
+      Outcome == "Complication" ~ p_complication_text,
+      Outcome == "Transplant" ~ p_transplant_text,
+      Outcome == "Death/Deterioration" ~ p_death_text,
+      TRUE ~ NA_character_
+    )
+  )
+
+cat("\n=== FORMATTED COMPARISON TABLE ===\n")
+print(comparison_table)
+
+# ----------------------------------------------------------------------------
+# PART 4: BY DEVICE TYPE - CUMULATIVE INCIDENCE AT MULTIPLE TIME POINTS
+# ----------------------------------------------------------------------------
+
+cat("\n\n=== CUMULATIVE INCIDENCE BY DEVICE TYPE AT MULTIPLE TIME POINTS ===\n")
+
+timepoints <- c(1, 2, 3, 4, 5, 6)
+device_multitime_results <- list()
+
+for(time in timepoints) {
+  summary_t <- summary(surv_by_device, times = time)
+  
+  device_names_t <- gsub("device_simple=", "", levels(summary_t$strata))
+  state_names_t <- summary_t$states
+  
+  for(device_idx in 1:length(device_names_t)) {
+    device <- device_names_t[device_idx]
+    
+    for(state_idx in 1:length(state_names_t)) {
+      state <- state_names_t[state_idx]
+      
+      if(state != "(s0)") {
+        est <- summary_t$pstate[device_idx, state_idx] * 100
+        lower <- summary_t$lower[device_idx, state_idx] * 100
+        upper <- summary_t$upper[device_idx, state_idx] * 100
+        at_risk <- summary_t$n.risk[device_idx, 1]  # First column is (s0)
+        
+        new_row <- data.frame(
+          Time = time,
+          Device = device,
+          Outcome = state,
+          Estimate = est,
+          Lower_CI = lower,
+          Upper_CI = upper,
+          At_Risk = at_risk,
+          CI_text = sprintf("%.1f%% (%.1f%%-%.1f%%)", est, lower, upper),
+          stringsAsFactors = FALSE
+        )
+        
+        device_multitime_results[[length(device_multitime_results) + 1]] <- new_row
+      }
+    }
+  }
+}
+
+device_multitime_df <- bind_rows(device_multitime_results)
+
+# Wide format for easy reading
+device_multitime_wide <- device_multitime_df %>%
+  select(Time, Device, Outcome, Estimate) %>%
+  pivot_wider(names_from = Time, values_from = Estimate, names_prefix = "Year_")
+
+cat("\nCumulative Incidence Over Time by Device (%):\n")
+print(device_multitime_wide, n = 50)
+
+# ----------------------------------------------------------------------------
+# CREATE PUBLICATION-READY TABLE
+# ----------------------------------------------------------------------------
+
+cat("\n\n=== PUBLICATION-READY TABLE: 6-YEAR CUMULATIVE INCIDENCE ===\n")
+
+if(exists("overall_6yr_df") && exists("device_6yr_df")) {
+  # Combine overall and by-device for manuscript table
+  pub_table <- overall_6yr_df %>%
+    mutate(Device = "Overall") %>%
+    select(Device, Outcome, CI_text) %>%
+    bind_rows(
+      device_6yr_df %>% select(Device, Outcome, CI_text)
+    ) %>%
+    pivot_wider(names_from = Device, values_from = CI_text)
+  
+  # Add p-values for device comparisons
+  pub_table <- pub_table %>%
+    mutate(
+      `P-value` = case_when(
+        Outcome == "Complication" ~ p_complication_text,
+        Outcome == "Transplant" ~ p_transplant_text,
+        Outcome == "Death/Deterioration" ~ p_death_text,
+        TRUE ~ NA_character_
+      )
+    )
+  
+  # Select columns dynamically
+  device_cols <- setdiff(names(pub_table), c("Outcome", "P-value"))
+  
+  if("Overall" %in% device_cols) {
+    other_devices <- setdiff(device_cols, "Overall")
+    pub_table <- pub_table %>%
+      select(Outcome, Overall, all_of(other_devices), `P-value`)
+  } else {
+    pub_table <- pub_table %>%
+      select(Outcome, everything())
+  }
+  
+  print(pub_table)
+  
+} else {
+  cat("\nWARNING: Overall or device 6-year data not found!\n")
+}
+
+cat("\n=== ANALYSIS COMPLETE ===\n")
+
+```
+
+
+``` {r sensitivity exception_after_listing}
+
+# ============================================================================
+# SENSITIVITY ANALYSIS: EXCLUDE EXCEPTIONS FROM COMPLICATIONS
+# ============================================================================
+
+cat("\n=== SENSITIVITY ANALYSIS: COMPLICATIONS EXCLUDING EXCEPTIONS ===\n")
+
+# Redefine first complication to EXCLUDE exceptions
+first_complication_no_exceptions <- lvad_hx_with_complications %>%
+  mutate(
+    CANHX_BEGIN_DT_clean = as.Date(CANHX_BEGIN_DT),
+    durable_lvad_date_clean = as.Date(durable_lvad_date),
+    # Flag true device-related complications (not discretionary, not exceptions)
+    is_device_complication = is_true_complication & !grepl("Exception", Reason_For_Status, ignore.case = TRUE)
+  ) %>%
+  filter(
+    is_device_complication == TRUE &
+    CANHX_BEGIN_DT_clean > durable_lvad_date_clean
+  ) %>%
+  group_by(PX_ID) %>%
+  arrange(CANHX_BEGIN_DT) %>%
+  slice(1) %>%
+  ungroup() %>%
+  select(PX_ID, complication_date = CANHX_BEGIN_DT, complication_reason = Reason_For_Status)
+
+cat(sprintf("Device complications (excluding exceptions): %d\n", nrow(first_complication_no_exceptions)))
+cat(sprintf("Original complications (including exceptions): %d\n", nrow(first_complication)))
+cat(sprintf("Exceptions excluded: %d\n", nrow(first_complication) - nrow(first_complication_no_exceptions)))
+
+# Recreate cohort with new complication definition
+cohort_sensitivity <- lvad_patient_list %>%
+  left_join(first_complication_no_exceptions, by = "PX_ID") %>%
+  left_join(status5_6_after_status4, by = "PX_ID") %>%
+  mutate(
+    last_followup_date = pmax(CAN_LAST_ACT_STAT_DT, CAN_LAST_INACT_STAT_DT, na.rm = TRUE),
+    end_date = if_else(!is.na(status5_6_date) & status5_6_date < coalesce(CAN_REM_DT, last_followup_date),
+                       status5_6_date, coalesce(CAN_REM_DT, last_followup_date)),
+    followup_years = as.numeric(difftime(end_date, durable_lvad_date, units = "days")) / 365.25,
+    time_to_complication_years = as.numeric(difftime(complication_date, durable_lvad_date, units = "days")) / 365.25,
+    transplanted = !is.na(CAN_REM_DT) & CAN_REM_CD == 4,
+    died = !is.na(CAN_REM_DT) & CAN_REM_CD %in% c(8, 13),
+    time_to_transplant_years = if_else(transplanted, as.numeric(difftime(CAN_REM_DT, durable_lvad_date, units = "days")) / 365.25, NA_real_),
+    time_to_death_years = if_else(died, as.numeric(difftime(CAN_REM_DT, durable_lvad_date, units = "days")) / 365.25, NA_real_),
+    event_type = case_when(
+      !is.na(complication_date) & complication_date <= end_date ~ 1L,
+      transplanted & (is.na(complication_date) | CAN_REM_DT < complication_date) ~ 2L,
+      died & (is.na(complication_date) | CAN_REM_DT < complication_date) ~ 3L,
+      !is.na(CAN_REM_DT) & !CAN_REM_CD %in% c(4, 8, 13) ~ 4L,
+      TRUE ~ 0L
+    ),
+    time_to_event_years = case_when(
+      event_type == 1 ~ time_to_complication_years,
+      event_type == 2 ~ time_to_transplant_years,
+      event_type == 3 ~ time_to_death_years,
+      event_type == 4 ~ as.numeric(difftime(CAN_REM_DT, durable_lvad_date, units = "days")) / 365.25,
+      TRUE ~ followup_years
+    ),
+    device_simple = if_else(device_type == "HeartMate 3", "HeartMate 3", "Other"),
+    event_label = factor(
+      case_when(event_type == 0 ~ 0L, event_type == 1 ~ 1L, event_type == 2 ~ 2L, event_type %in% c(3, 4) ~ 3L),
+      levels = c(0, 1, 2, 3),
+      labels = c("Censored", "Complication", "Transplant", "Death/Deterioration")
+    )
+  ) %>%
+  filter(followup_years > 0 & time_to_event_years > 0)
+
+# Event summary
+cat("\n=== SENSITIVITY ANALYSIS EVENT SUMMARY ===\n")
+print(table(cohort_sensitivity$event_label))
+
+# Create CIF
+surv_sensitivity <- survfit2(Surv(time_to_event_years, event_label) ~ 1, data = cohort_sensitivity)
+surv_sensitivity_device <- survfit2(Surv(time_to_event_years, event_label) ~ device_simple, data = cohort_sensitivity)
+
+# Extract 6-year estimates
+summary_6yr_sens <- summary(surv_sensitivity, times = 6)
+cat("\n=== 6-YEAR CUMULATIVE INCIDENCE (EXCLUDING EXCEPTIONS) ===\n")
+for(i in 1:length(summary_6yr_sens$states)) {
+  if(summary_6yr_sens$states[i] != "(s0)") {
+    cat(sprintf("%s: %.1f%% (%.1f%%-%.1f%%)\n", 
+                summary_6yr_sens$states[i],
+                summary_6yr_sens$pstate[i]*100,
+                summary_6yr_sens$lower[i]*100,
+                summary_6yr_sens$upper[i]*100))
+  }
+}
+
+# By device
+summary_6yr_sens_device <- summary(surv_sensitivity_device, times = 6)
+device_names_sens <- gsub("device_simple=", "", levels(summary_6yr_sens_device$strata))
+cat("\n=== BY DEVICE TYPE ===\n")
+for(device_idx in 1:length(device_names_sens)) {
+  cat(sprintf("\n%s:\n", device_names_sens[device_idx]))
+  for(state_idx in 1:length(summary_6yr_sens_device$states)) {
+    if(summary_6yr_sens_device$states[state_idx] != "(s0)") {
+      cat(sprintf("  %s: %.1f%% (%.1f%%-%.1f%%)\n",
+                  summary_6yr_sens_device$states[state_idx],
+                  summary_6yr_sens_device$pstate[device_idx, state_idx]*100,
+                  summary_6yr_sens_device$lower[device_idx, state_idx]*100,
+                  summary_6yr_sens_device$upper[device_idx, state_idx]*100))
+    }
+  }
+}
+
+# Compare to main analysis
+cat("\n=== COMPARISON: MAIN vs SENSITIVITY ===\n")
+cat(sprintf("Main analysis complications: %.1f%%\n", summary(surv_overall, times=6)$pstate[2]*100))
+cat(sprintf("Sensitivity (no exceptions): %.1f%%\n", summary_6yr_sens$pstate[2]*100))
+cat(sprintf("Difference: %.1f percentage points\n", 
+            summary(surv_overall, times=6)$pstate[2]*100 - summary_6yr_sens$pstate[2]*100))
+
+# ============================================================================
+# PLOT: SENSITIVITY ANALYSIS - OVERALL CIF
+# ============================================================================
+
+options("ggsurvfit.switch-color-linetype" = TRUE)
+
+p_sensitivity_overall <- surv_sensitivity %>%
+  ggcuminc(
+    outcome = c("Complication", "Transplant", "Death/Deterioration"),
+    linewidth = 1.2
+  ) + 
+  add_confidence_interval(alpha = 0.2) +
+  add_risktable(size = 5, 
+                theme = theme_risktable_default(plot.title.size = 14, 
+                                                axis.text.y.size = 14)) +
+  scale_x_continuous(breaks = 0:6, limits = c(0, 6)) +
+  scale_y_continuous(
+    limits = c(0, 1),
+    labels = scales::percent,
+    expand = c(0.01, 0)
+  ) +
+  #geom_vline(xintercept = 6, linetype = "dashed", color = "black", linewidth = 0.8) +
+  annotate("text", x = 6.1, y = 0.05, 
+           label = "OPTN Policy Threshold\n(6 Years)", 
+           hjust = 0, size = 5) +
+  xlab("Years Since LVAD Implantation") +
+  ylab("Cumulative Incidence") +
+  #ggtitle("Sensitivity Analysis: Cumulative Incidence (Excluding Status Exceptions)") +
+  scale_color_manual(values = c("Complication" = '#df8f44',
+                                "Transplant" = '#00a1d5', 
+                                "Death/Deterioration" = '#374e55')) +
+  scale_fill_manual(values = c("Complication" = '#df8f44',
+                              "Transplant" = '#00a1d5',
+                              "Death/Deterioration" = '#374e55')) +
+  theme_classic() +
+  theme(
+    plot.title = element_text(size = 16, face = "bold"),
+    legend.title = element_blank(),
+    legend.position = "bottom",
+    axis.text.x = element_text(size = 15),
+    axis.title.x = element_text(size = 15),
+    axis.text.y = element_text(size = 15),
+    axis.title.y = element_text(size = 15),
+    legend.text = element_text(size = 15)
+  )
+
+print(p_sensitivity_overall)
+
+
+```
+
+
+``` {r sensitivity listing}
+
+# ============================================================================
+# SENSITIVITY ANALYSIS: TIME FROM LISTING (NOT LVAD IMPLANT)
+# ============================================================================
+
+cat("\n=== SENSITIVITY ANALYSIS: TIME FROM LISTING DATE ===\n")
+
+# Recreate cohort with listing date as time zero
+cohort_from_listing <- lvad_patient_list %>%
+  left_join(first_complication, by = "PX_ID") %>%
+  left_join(status5_6_after_status4, by = "PX_ID") %>%
+  mutate(
+    # Time zero = listing date
+    time_zero = CAN_LISTING_DT,
+    
+    # End date (same logic as before)
+    last_followup_date = pmax(CAN_LAST_ACT_STAT_DT, CAN_LAST_INACT_STAT_DT, na.rm = TRUE),
+    end_date = if_else(!is.na(status5_6_date) & status5_6_date < coalesce(CAN_REM_DT, last_followup_date),
+                       status5_6_date, coalesce(CAN_REM_DT, last_followup_date)),
+    
+    # Follow-up time FROM LISTING
+    followup_years = as.numeric(difftime(end_date, time_zero, units = "days")) / 365.25,
+    
+    # Time to events FROM LISTING
+    time_to_complication_years = as.numeric(difftime(complication_date, time_zero, units = "days")) / 365.25,
+    time_to_transplant_years = if_else(!is.na(CAN_REM_DT) & CAN_REM_CD == 4,
+                                       as.numeric(difftime(CAN_REM_DT, time_zero, units = "days")) / 365.25,
+                                       NA_real_),
+    time_to_death_years = if_else(!is.na(CAN_REM_DT) & CAN_REM_CD %in% c(8, 13),
+                                  as.numeric(difftime(CAN_REM_DT, time_zero, units = "days")) / 365.25,
+                                  NA_real_),
+    
+    # Event type (same logic)
+    transplanted = !is.na(CAN_REM_DT) & CAN_REM_CD == 4,
+    died = !is.na(CAN_REM_DT) & CAN_REM_CD %in% c(8, 13),
+    
+    event_type = case_when(
+      !is.na(complication_date) & complication_date <= end_date ~ 1L,
+      transplanted & (is.na(complication_date) | CAN_REM_DT < complication_date) ~ 2L,
+      died & (is.na(complication_date) | CAN_REM_DT < complication_date) ~ 3L,
+      !is.na(CAN_REM_DT) & !CAN_REM_CD %in% c(4, 8, 13) ~ 4L,
+      TRUE ~ 0L
+    ),
+    
+    time_to_event_years = case_when(
+      event_type == 1 ~ time_to_complication_years,
+      event_type == 2 ~ time_to_transplant_years,
+      event_type == 3 ~ time_to_death_years,
+      event_type == 4 ~ as.numeric(difftime(CAN_REM_DT, time_zero, units = "days")) / 365.25,
+      TRUE ~ followup_years
+    ),
+    
+    event_label = factor(
+      case_when(event_type == 0 ~ 0L, event_type == 1 ~ 1L, event_type == 2 ~ 2L, event_type %in% c(3, 4) ~ 3L),
+      levels = c(0, 1, 2, 3),
+      labels = c("Censored", "Complication", "Transplant", "Death/Deterioration")
+    )
+  ) 
+#%>%
+  #filter(followup_years > 0 & time_to_event_years > 0)
+
+cat(sprintf("Total patients: %d\n", nrow(cohort_from_listing)))
+cat(sprintf("Median follow-up from listing: %.2f years\n", median(cohort_from_listing$followup_years)))
+
+# Event summary
+cat("\n=== EVENT SUMMARY (FROM LISTING) ===\n")
+print(table(cohort_from_listing$event_label))
+
+# Create CIF
+surv_from_listing <- survfit2(Surv(time_to_event_years, event_label) ~ 1, data = cohort_from_listing)
+
+# Extract 6-year estimates
+summary_6yr_listing <- summary(surv_from_listing, times = 6)
+cat("\n=== 6-YEAR CUMULATIVE INCIDENCE (FROM LISTING DATE) ===\n")
+for(i in 1:length(summary_6yr_listing$states)) {
+  if(summary_6yr_listing$states[i] != "(s0)") {
+    cat(sprintf("%s: %.1f%% (%.1f%%-%.1f%%)\n", 
+                summary_6yr_listing$states[i],
+                summary_6yr_listing$pstate[i]*100,
+                summary_6yr_listing$lower[i]*100,
+                summary_6yr_listing$upper[i]*100))
+  }
+}
+
+summary_0yr_listing <- summary(surv_from_listing, times = 0)
+cat("\n=== 6-YEAR CUMULATIVE INCIDENCE (FROM LISTING DATE) ===\n")
+for(i in 1:length(summary_0yr_listing$states)) {
+  if(summary_6yr_listing$states[i] != "(s0)") {
+    cat(sprintf("%s: %.1f%% (%.1f%%-%.1f%%)\n", 
+                summary_0yr_listing$states[i],
+                summary_0yr_listing$pstate[i]*100,
+                summary_0yr_listing$lower[i]*100,
+                summary_0yr_listing$upper[i]*100))
+  }
+}
+
+# Compare to main analysis
+cat("\n=== COMPARISON: FROM LVAD vs FROM LISTING ===\n")
+cat("At 6 years:\n")
+cat(sprintf("  From LVAD - Complication: %.1f%%\n", summary(surv_overall, times=6)$pstate[2]*100))
+cat(sprintf("  From Listing - Complication: %.1f%%\n", summary_6yr_listing$pstate[2]*100))
+cat(sprintf("  From LVAD - Transplant: %.1f%%\n", summary(surv_overall, times=6)$pstate[3]*100))
+cat(sprintf("  From Listing - Transplant: %.1f%%\n", summary_6yr_listing$pstate[3]*100))
+
+# ============================================================================
+# PLOT: SENSITIVITY ANALYSIS - FROM LISTING DATE
+# ============================================================================
+
+options("ggsurvfit.switch-color-linetype" = TRUE)
+
+p_from_listing <- surv_from_listing %>%
+  ggcuminc(
+    outcome = c("Complication", "Transplant", "Death/Deterioration"),
+    linewidth = 1.2
+  ) + 
+  add_confidence_interval(alpha = 0.2) +
+  add_risktable(size = 5, 
+                theme = theme_risktable_default(plot.title.size = 14, 
+                                                axis.text.y.size = 14)) +
+  scale_x_continuous(breaks = 0:6, limits = c(0, 6)) +
+  scale_y_continuous(
+    limits = c(0, 1),
+    labels = scales::percent,
+    expand = c(0.01, 0)
+  ) +
+  #geom_vline(xintercept = 6, linetype = "dashed", color = "black", linewidth = 0.8) +
+  annotate("text", x = 6.1, y = 0.05, 
+           label = "6 Years", 
+           hjust = 0, size = 4) +
+  xlab("Years Since Initial Listing") +
+  ylab("Cumulative Incidence") +
+  #ggtitle("Sensitivity Analysis: Cumulative Incidence from Initial Listing Date") +
+  scale_color_manual(values = c("Complication" = '#df8f44',
+                                "Transplant" = '#00a1d5', 
+                                "Death/Deterioration" = '#374e55')) +
+  scale_fill_manual(values = c("Complication" = '#df8f44',
+                              "Transplant" = '#00a1d5',
+                              "Death/Deterioration" = '#374e55')) +
+  theme_classic() +
+  theme(
+    plot.title = element_text(size = 16, face = "bold"),
+    legend.title = element_blank(),
+    legend.position = "bottom",
+    axis.text.x = element_text(size = 14),
+    axis.title.x = element_text(size = 14),
+    axis.text.y = element_text(size = 14),
+    axis.title.y = element_text(size = 14),
+    legend.text = element_text(size = 14)
+  )
+
+print(p_from_listing)
+
+cat("\n=== SENSITIVITY ANALYSIS FROM LISTING COMPLETE ===\n")
+
+
+# Check complications at listing date
+cohort_from_listing %>%
+  filter(event_type == 1) %>%  # Only complications
+  mutate(days_to_complication = time_to_complication_years * 365.25) %>%
+  summarise(
+    total_complications = n(),
+    same_day = sum(days_to_complication == 0, na.rm = TRUE),
+    within_1_day = sum(days_to_complication >= 0 & days_to_complication < 1, na.rm = TRUE),
+    within_7_days = sum(days_to_complication >= 0 & days_to_complication < 7, na.rm = TRUE),
+    within_30_days = sum(days_to_complication >= 0 & days_to_complication < 30, na.rm = TRUE),
+    negative_time = sum(days_to_complication < 0, na.rm = TRUE)
+  )
+
+# Distribution of early complications
+cohort_from_listing %>%
+  filter(event_type == 1) %>%
+  mutate(days_to_complication = time_to_complication_years * 365.25) %>%
+  filter(days_to_complication < 30) %>%  # First 30 days only
+  count(days_to_complication = round(days_to_complication)) %>%
+  arrange(days_to_complication)
+
+```
+
+``` {r center variability}
+
+# ============================================================================
+# LVAD TIMING RELATIVE TO LISTING - BY CENTER
+# ============================================================================
+
+cat("\n=== LVAD TIMING RELATIVE TO LISTING ===\n")
+
+# Calculate time from listing to LVAD implant for each patient
+lvad_timing <- lvad_patient_list %>%
+  mutate(
+    days_listing_to_lvad = as.numeric(difftime(durable_lvad_date, CAN_LISTING_DT, units = "days")),
+    years_listing_to_lvad = days_listing_to_lvad / 365.25
+  ) %>%
+  filter(!is.na(days_listing_to_lvad))
+
+# Overall summary statistics
+cat("\n=== OVERALL SUMMARY ===\n")
+cat(sprintf("Total patients: %d\n", nrow(lvad_timing)))
+cat(sprintf("Median time from listing to LVAD: %.2f years (%.0f days)\n", 
+            median(lvad_timing$years_listing_to_lvad),
+            median(lvad_timing$days_listing_to_lvad)))
+cat(sprintf("IQR: %.2f to %.2f years\n", 
+            quantile(lvad_timing$years_listing_to_lvad, 0.25),
+            quantile(lvad_timing$years_listing_to_lvad, 0.75)))
+cat(sprintf("Patients with LVAD BEFORE listing (negative): %d (%.1f%%)\n",
+            sum(lvad_timing$days_listing_to_lvad < 0),
+            100 * sum(lvad_timing$days_listing_to_lvad < 0) / nrow(lvad_timing)))
+cat(sprintf("Patients with LVAD AT listing (0 days): %d (%.1f%%)\n",
+            sum(lvad_timing$days_listing_to_lvad == 0),
+            100 * sum(lvad_timing$days_listing_to_lvad == 0) / nrow(lvad_timing)))
+cat(sprintf("Patients with LVAD AFTER listing (positive): %d (%.1f%%)\n",
+            sum(lvad_timing$days_listing_to_lvad > 0),
+            100 * sum(lvad_timing$days_listing_to_lvad > 0) / nrow(lvad_timing)))
+
+# Calculate median and IQR by center
+center_summary <- lvad_timing %>%
+  group_by(CAN_LISTING_CTR_CD) %>%
+  summarise(
+    n = n(),
+    median_days = median(days_listing_to_lvad, na.rm = TRUE),
+    q25 = quantile(days_listing_to_lvad, 0.25, na.rm = TRUE),
+    q75 = quantile(days_listing_to_lvad, 0.75, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  filter(n >= 5) %>%  # Only include centers with at least 5 patients
+  arrange(median_days) %>%
+  mutate(center_rank = row_number())
+
+cat(sprintf("\nCenters with ≥5 patients: %d\n", nrow(center_summary)))
+cat(sprintf("Patients in these centers: %d (%.1f%%)\n", 
+            sum(center_summary$n),
+            100 * sum(center_summary$n) / nrow(lvad_timing)))
+
+print(center_summary)
+
+# Create plot
+center_variability_plot <- ggplot(center_summary, aes(x = center_rank, y = median_days)) +
+  geom_point(size = 2, color = "#00a1d5") +
+  geom_errorbar(aes(ymin = q25, ymax = q75), width = 0.3, color = "#00a1d5", alpha = 0.6) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red", linewidth = 0.8) +
+  scale_y_continuous(
+    breaks = seq(-2000, 2000, 500),
+    labels = function(x) ifelse(x < 0, paste0(abs(x), " Days Before"), 
+                                ifelse(x == 0, "At Listing", paste0(x, " Days After")))
+  ) +
+  labs(
+    x = "Transplant Center (Ranked by Median)",
+    y = "Time from Listing to LVAD Implantation (Days)"
+  ) +
+  theme_classic() +
+  theme(
+    plot.title = element_text(size = 16, face = "bold"),
+    plot.subtitle = element_text(size = 12),
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.text.y = element_text(size = 12),
+    axis.title = element_text(size = 14)
+  )
+
+print(center_variability_plot)
+
+# Test for center-level variation
+kruskal_test <- kruskal.test(days_listing_to_lvad ~ CAN_LISTING_CTR_CD, 
+                             data = lvad_timing %>% 
+                               filter(CAN_LISTING_CTR_CD %in% center_summary$CAN_LISTING_CTR_CD))
+
+cat("\n=== KRUSKAL-WALLIS TEST FOR CENTER VARIATION ===\n")
+cat(sprintf("Chi-squared = %.2f, df = %d, p-value < %.3e\n",
+            kruskal_test$statistic, kruskal_test$parameter, kruskal_test$p.value))
+
+# Before/after filtering statistics
+total_centers <- lvad_timing %>%
+  group_by(CAN_LISTING_CTR_CD) %>%
+  summarise(n = n(), .groups = "drop")
+
+cat("\n=== FILTERING IMPACT ===\n")
+cat("Before filtering (n >= 5):\n")
+cat(sprintf("  Total centers: %d\n", nrow(total_centers)))
+cat(sprintf("  Total patients: %d\n", nrow(lvad_timing)))
+
+cat("\nAfter filtering (n >= 5):\n")
+cat(sprintf("  Remaining centers: %d\n", nrow(center_summary)))
+cat(sprintf("  Remaining patients: %d\n", sum(center_summary$n)))
+
+centers_removed <- nrow(total_centers) - nrow(center_summary)
+patients_removed <- nrow(lvad_timing) - sum(center_summary$n)
+
+cat("\nRemoved:\n")
+cat(sprintf("  Centers: %d (%.1f%%)\n", 
+            centers_removed, 100 * centers_removed / nrow(total_centers)))
+cat(sprintf("  Patients: %d (%.1f%%)\n", 
+            patients_removed, 100 * patients_removed / nrow(lvad_timing)))
+
+# Distribution of small centers
+small_centers <- total_centers %>%
+  filter(n < 5) %>%
+  arrange(n)
+
+cat("\n=== DISTRIBUTION OF CENTERS WITH <5 PATIENTS ===\n")
+print(table(small_centers$n))
+
+
+
+
+
+# ============================================================================
+# TABLE: LVAD TIMING BY CENTER
+# ============================================================================
+
+# Create formatted table
+center_timing_table <- center_summary %>%
+  mutate(
+    median_years = median_days / 365.25,
+    q25_years = q25 / 365.25,
+    q75_years = q75 / 365.25,
+    median_formatted = sprintf("%.1f (%.1f, %.1f)", median_years, q25_years, q75_years),
+    median_days_formatted = sprintf("%.0f (%.0f, %.0f)", median_days, q25, q75),
+    timing_category = case_when(
+      median_days < -365 ~ "LVAD >1 year before listing",
+      median_days < 0 ~ "LVAD before listing (<1 year)",
+      median_days == 0 ~ "LVAD at listing",
+      median_days <= 365 ~ "LVAD after listing (<1 year)",
+      TRUE ~ "LVAD >1 year after listing"
+    )
+  ) %>%
+  select(CAN_LISTING_CTR_CD, n, median_days, q25, q75, 
+         median_years, median_formatted, median_days_formatted, timing_category) %>%
+  arrange(median_days)
+
+# Display table
+cat("\n=== LVAD TIMING BY CENTER (Median and IQR) ===\n")
+print(center_timing_table, n = 200)
+
+# Summary by category
+cat("\n=== CENTERS BY TIMING CATEGORY ===\n")
+category_summary <- center_timing_table %>%
+  group_by(timing_category) %>%
+  summarise(
+    n_centers = n(),
+    n_patients = sum(n),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(n_centers))
+
+print(category_summary)
+
+# Export table
+cat("\n=== EXPORTING TABLE ===\n")
+
+# Clean version for manuscript
+center_timing_export <- center_timing_table %>%
+  select(
+    `Center` = CAN_LISTING_CTR_CD,
+    `N` = n,
+    `Median (IQR) Days` = median_days_formatted,
+    `Median (IQR) Years` = median_formatted,
+    `Category` = timing_category
+  )
+
+print(center_timing_export, n = 200)
+
+# Save as CSV (if you want)
+# write_csv(center_timing_export, "/mnt/user-data/outputs/lvad_timing_by_center.csv")
+
+cat("\nTable ready for manuscript!\n")
+
+```
+
+
+
+
+``` {r sensitivity 2021 2024}
+
+# ============================================================================
+# SENSITIVITY ANALYSIS: BY LVAD IMPLANTATION PERIOD
+# ============================================================================
+
+cat("\n=== SENSITIVITY ANALYSIS: BY LVAD IMPLANTATION PERIOD ===\n")
+
+# Define periods and apply censoring
+cohort_by_period <- cohort_with_outcomes %>%
+  mutate(
+    # Define periods
+    period = case_when(
+      durable_lvad_date >= mdy("10-18-2018") & durable_lvad_date <= mdy("06-30-2021") ~ "Period 1: Oct 2018 - Jun 2021",
+      durable_lvad_date >= mdy("10-01-2021") & durable_lvad_date <= mdy("06-30-2024") ~ "Period 2: Oct 2021 - Jun 2024",
+      TRUE ~ NA_character_
+    ),
+    
+    # Apply administrative censoring for Period 1 at June 30, 2022
+    admin_censor_date = if_else(
+      period == "Period 1: Oct 2018 - Jun 2021",
+      as.Date("2022-06-30"),
+      as.Date("2025-06-30")  # Period 2 follows to data cutoff
+    ),
+    
+    # Recalculate end date with administrative censoring
+    end_date_period = pmin(end_date, admin_censor_date, na.rm = TRUE),
+    
+    # Recalculate follow-up and event times
+    followup_years_period = as.numeric(difftime(end_date_period, durable_lvad_date, units = "days")) / 365.25,
+    
+    # Recalculate event type considering new censoring
+    event_type_period = case_when(
+      !is.na(complication_date) & complication_date <= end_date_period ~ 1L,
+      !is.na(CAN_REM_DT) & CAN_REM_DT <= end_date_period & CAN_REM_CD == 4 & 
+        (is.na(complication_date) | CAN_REM_DT < complication_date) ~ 2L,
+      !is.na(CAN_REM_DT) & CAN_REM_DT <= end_date_period & CAN_REM_CD %in% c(8, 13) & 
+        (is.na(complication_date) | CAN_REM_DT < complication_date) ~ 3L,
+      !is.na(CAN_REM_DT) & CAN_REM_DT <= end_date_period & !CAN_REM_CD %in% c(4, 8, 13) ~ 4L,
+      TRUE ~ 0L
+    ),
+    
+    time_to_event_years_period = case_when(
+      event_type_period == 1 ~ time_to_complication_years,
+      event_type_period == 2 ~ time_to_transplant_years,
+      event_type_period == 3 ~ time_to_death_years,
+      event_type_period == 4 ~ as.numeric(difftime(CAN_REM_DT, durable_lvad_date, units = "days")) / 365.25,
+      TRUE ~ followup_years_period
+    ),
+    
+    event_label_period = factor(
+      case_when(event_type_period == 0 ~ 0L, event_type_period == 1 ~ 1L, 
+                event_type_period == 2 ~ 2L, event_type_period %in% c(3, 4) ~ 3L),
+      levels = c(0, 1, 2, 3),
+      labels = c("Censored", "Complication", "Transplant", "Death/Deterioration")
+    )
+  ) %>%
+  filter(!is.na(period) & followup_years_period > 0 & time_to_event_years_period > 0)
+
+# Summary by period
+cat("\n=== COHORT BY PERIOD ===\n")
+period_summary <- cohort_by_period %>%
+  group_by(period) %>%
+  summarise(
+    n = n(),
+    median_followup = median(followup_years_period),
+    max_followup = max(followup_years_period)
+  )
+print(period_summary)
+
+cat("\n=== EVENTS BY PERIOD ===\n")
+print(table(cohort_by_period$period, cohort_by_period$event_label_period))
+
+# Create CIF by period
+surv_by_period <- survfit2(Surv(time_to_event_years_period, event_label_period) ~ period, 
+                           data = cohort_by_period)
+
+# Extract 3-year estimates
+summary_3yr_period <- summary(surv_by_period, times = 3)
+period_names <- gsub("period=", "", levels(summary_3yr_period$strata))
+
+cat("\n=== 3-YEAR CUMULATIVE INCIDENCE BY PERIOD ===\n")
+for(period_idx in 1:length(period_names)) {
+  cat(sprintf("\n%s:\n", period_names[period_idx]))
+  for(state_idx in 1:length(summary_3yr_period$states)) {
+    if(summary_3yr_period$states[state_idx] != "(s0)") {
+      cat(sprintf("  %s: %.1f%% (%.1f%%-%.1f%%)\n",
+                  summary_3yr_period$states[state_idx],
+                  summary_3yr_period$pstate[period_idx, state_idx]*100,
+                  summary_3yr_period$lower[period_idx, state_idx]*100,
+                  summary_3yr_period$upper[period_idx, state_idx]*100))
+    }
+  }
+}
+
+# Fine-Gray tests by period
+cat("\n=== FINE-GRAY TESTS (Period 2 vs Period 1) ===\n")
+
+cif_data_period_crr <- cohort_by_period %>%
+  mutate(
+    event_type_combined = case_when(
+      event_type_period == 0 ~ 0L, event_type_period == 1 ~ 1L, 
+      event_type_period == 2 ~ 2L, event_type_period %in% c(3, 4) ~ 3L
+    ),
+    period_2 = as.numeric(period == "Period 2: Oct 2021 - Jun 2024")
+  )
+
+# Complication
+fg_comp_period <- cmprsk::crr(cif_data_period_crr$time_to_event_years_period, 
+                              cif_data_period_crr$event_type_combined,
+                              cov1 = cbind(cif_data_period_crr$period_2), 
+                              failcode = 1, cencode = 0)
+p_comp_period <- 2 * (1 - pnorm(abs(fg_comp_period$coef / sqrt(fg_comp_period$var))))
+p_comp_period_text <- ifelse(p_comp_period < 0.001, "< 0.001", sprintf("%.3f", p_comp_period))
+
+# Transplant
+fg_tx_period <- cmprsk::crr(cif_data_period_crr$time_to_event_years_period, 
+                            cif_data_period_crr$event_type_combined,
+                            cov1 = cbind(cif_data_period_crr$period_2), 
+                            failcode = 2, cencode = 0)
+p_tx_period <- 2 * (1 - pnorm(abs(fg_tx_period$coef / sqrt(fg_tx_period$var))))
+p_tx_period_text <- ifelse(p_tx_period < 0.001, "< 0.001", sprintf("%.3f", p_tx_period))
+
+# Death/Deterioration
+fg_death_period <- cmprsk::crr(cif_data_period_crr$time_to_event_years_period, 
+                               cif_data_period_crr$event_type_combined,
+                               cov1 = cbind(cif_data_period_crr$period_2), 
+                               failcode = 3, cencode = 0)
+p_death_period <- 2 * (1 - pnorm(abs(fg_death_period$coef / sqrt(fg_death_period$var))))
+p_death_period_text <- ifelse(p_death_period < 0.001, "< 0.001", sprintf("%.3f", p_death_period))
+
+cat("Complication p:", p_comp_period_text, "\n")
+cat("Transplant p:", p_tx_period_text, "\n")
+cat("Death/Deterioration p:", p_death_period_text, "\n")
+
+# ============================================================================
+# PLOT: BY PERIOD
+# ============================================================================
+
+options("ggsurvfit.switch-color-linetype" = FALSE)
+
+p_by_period <- surv_by_period %>%
+  ggcuminc(
+    outcome = c("Complication", "Transplant", "Death/Deterioration"),
+    linewidth = 1.2
+  ) +
+  add_confidence_interval(alpha = 0.2) +
+  add_risktable(size = 5,
+                theme = theme_risktable_default(plot.title.size = 14,
+                                                axis.text.y.size = 14)) +
+  scale_x_continuous(breaks = seq(0, 3, 0.5), limits = c(0, 3)) +
+  scale_y_continuous(
+    limits = c(0, 0.5),
+    labels = scales::percent,
+    expand = c(0.01, 0)
+  ) +
+  #geom_vline(xintercept = 3, linetype = "dashed", color = "gray50", linewidth = 0.6) +
+  xlab("Years Since LVAD Implantation") +
+  ylab("Cumulative Incidence") +
+  #ggtitle("Cumulative Incidence by LVAD Implantation Period") +
+  scale_color_manual(values = c("Period 1: Oct 2018 - Jun 2021" = "#0077BB",
+                                "Period 2: Oct 2021 - Jun 2024" = "#CC3311"),
+                    name = "Period") +
+  scale_fill_manual(values = c("Period 1: Oct 2018 - Jun 2021" = "#0077BB",
+                              "Period 2: Oct 2021 - Jun 2024" = "#CC3311"),
+                   name = "Period") +
+  scale_linetype_manual(values = c("Complication" = "solid",
+                                   "Transplant" = "dashed",
+                                   "Death/Deterioration" = "dotted"),
+                       name = "Outcome") +
+  annotate("text", x = 0, y = 0.48, hjust = 0, size = 5,
+           label = paste0("Complication p: ", p_comp_period_text)) +
+  annotate("text", x = 0, y = 0.43, hjust = 0, size = 5,
+           label = paste0("Transplant p: ", p_tx_period_text)) +
+  annotate("text", x = 0, y = 0.38, hjust = 0, size = 5,
+           label = paste0("Death/Deterioration p: ", p_death_period_text)) +
+  theme_classic() +
+  guides(color = guide_legend(nrow = 2, byrow = TRUE),
+         fill = guide_legend(nrow = 2, byrow = TRUE),
+         linetype = guide_legend(nrow = 2, byrow = TRUE)) +
+  theme(
+    plot.title = element_text(size = 16, face = "bold"),
+    legend.title = element_blank(),
+    legend.position = "bottom",
+    axis.text.x = element_text(size = 15),
+    axis.title.x = element_text(size = 15),
+    axis.text.y = element_text(size = 15),
+    axis.title.y = element_text(size = 15),
+    legend.text = element_text(size = 15)
+  )
+
+print(p_by_period)
+
+cat("\n=== PERIOD ANALYSIS COMPLETE ===\n")
+
+
+```

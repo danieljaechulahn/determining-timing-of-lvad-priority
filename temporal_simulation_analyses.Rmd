@@ -1,0 +1,1136 @@
+---
+title: "Untitled"
+output: html_document
+date: "2026-01-20"
+---
+
+``` {r transplant plot}
+# ============================================================================
+# STATUS AT TRANSPLANT STRATIFIED BY COMPLICATION TYPE
+# ============================================================================
+# ============================================================================
+# CONSTRUCT: STATUS AT TRANSPLANT (ALL TRANSPLANTS, RESPECTING CENSORING)
+# ============================================================================
+
+cat("\n=== CONSTRUCTING STATUS AT TRANSPLANT DATASET (ALL TRANSPLANTS) ===\n")
+
+# Get ALL transplanted patients, but respect Status 5/6 censoring
+transplanted_patients <- cohort_with_outcomes %>%
+  filter(transplanted == TRUE) %>%  # All who were transplanted (CAN_REM_CD == 4)
+  filter(CAN_REM_DT <= end_date) %>%  # But only if transplant occurred before censoring
+  select(PX_ID, CAN_REM_DT, end_date, durable_lvad_date)
+
+cat(sprintf("Total transplanted patients: %d\n", nrow(transplanted_patients)))
+
+# Find the status that was active at transplant
+status_at_transplant <- transplanted_patients %>%
+  left_join(
+    lvad_hx_list_episodes %>%
+      select(PX_ID, CANHX_BEGIN_DT, CANHX_END_DT, CANHX_STAT_CD),
+    by = "PX_ID"
+  ) %>%
+  # Status episode must be active on transplant date
+  filter(
+    CANHX_BEGIN_DT <= CAN_REM_DT &
+    (is.na(CANHX_END_DT) | CANHX_END_DT >= CAN_REM_DT)
+  ) %>%
+  # If multiple episodes match, take most recent
+  group_by(PX_ID) %>%
+  arrange(desc(CANHX_BEGIN_DT)) %>%
+  slice(1) %>%
+  ungroup() %>%
+  # Create status label
+  mutate(
+    status_label = case_when(
+      CANHX_STAT_CD == 2110 ~ "Status 1",
+      CANHX_STAT_CD == 2120 ~ "Status 2",
+      CANHX_STAT_CD == 2130 ~ "Status 3",
+      CANHX_STAT_CD == 2140 ~ "Status 4",
+      CANHX_STAT_CD == 2150 ~ "Status 5",
+      CANHX_STAT_CD == 2160 ~ "Status 6",
+      TRUE ~ "Other"
+    )
+  ) %>%
+  select(PX_ID, CAN_REM_DT, CANHX_BEGIN_DT, CANHX_END_DT, CANHX_STAT_CD, status_label)
+
+cat(sprintf("Matched to status episodes: %d\n", nrow(status_at_transplant)))
+
+# Summary of status at transplant
+cat("\n=== STATUS AT TRANSPLANT DISTRIBUTION ===\n")
+status_dist <- table(status_at_transplant$status_label)
+print(status_dist)
+cat("\nPercentages:\n")
+print(round(prop.table(status_dist) * 100, 1))
+
+# Filter to Status 1-4 only for visualization
+status_at_transplant <- status_at_transplant %>%
+  filter(status_label %in% c("Status 1", "Status 2", "Status 3", "Status 4"))
+
+cat(sprintf("\nTransplants for visualization (Status 1-4 only): %d\n", nrow(status_at_transplant)))
+
+
+
+# Get ALL Reason_For_Status by joining to full complications data
+status_at_transplant_with_reasons <- status_at_transplant %>%
+  left_join(
+    lvad_hx_with_complications %>%
+      select(PX_ID, CANHX_BEGIN_DT, Reason_For_Status, is_discretionary),
+    by = c("PX_ID", "CANHX_BEGIN_DT")
+  )
+
+# Categorize complications
+status_at_transplant_categorized <- status_at_transplant_with_reasons %>%
+  mutate(
+    complication_category = case_when(
+      # Status 4 = Durable LVAD (no complication)
+      status_label == "Status 4" ~ "Durable LVAD",
+      
+      # Discretionary LVAD time
+      is_discretionary == TRUE ~ "Discretionary LVAD Time",
+      
+      # Section A: Objective LVAD-Related Complications
+      grepl("Life Threatening Ventricular Arrhythmia|Device Malfunction|Recurrent or Sustained VT/VF|Device Infection|Aortic Insufficiency|Hemolysis|Mucosal Bleeding|Pump Thrombosis|Right Heart Failure|VF", 
+            Reason_For_Status, ignore.case = TRUE) ~ 
+        "Objective LVAD Complications",
+      
+      # Section C: Exception-Related Justifications (includes Not Documented)
+      grepl("Exception", Reason_For_Status, ignore.case = TRUE) | is.na(Reason_For_Status) ~ 
+        "Exception",
+      
+      # Section B: Additional Hemodynamic or Mechanical Support
+      grepl("ECMO|BIVAD|Bi-VAD|BiVAD|IABP|Non-Dischargeable|PEVAD|TAH|RVAD|Single Ventricle|Inotropes|Inotrope", 
+            Reason_For_Status, ignore.case = TRUE) ~ 
+        "Additional Hemodynamic/MCS Support",
+      
+      # Catch-all for anything else
+      TRUE ~ "Other"
+    )
+  )
+
+# Filter to Status 1-4 only
+status_at_transplant_categorized_clean <- status_at_transplant_categorized %>%
+  filter(!status_label %in% c("Status 5", "Status 6", "Other"))
+
+# Check what we're getting
+cat("\n=== COMPLICATION CATEGORY SUMMARY ===\n")
+category_summary <- status_at_transplant_categorized_clean %>%
+  count(complication_category, sort = TRUE) %>%
+  mutate(
+    percent = n / sum(n) * 100,
+    display = sprintf("%d (%.1f%%)", n, percent)
+  )
+print(category_summary)
+
+cat("\n=== CATEGORY BY STATUS ===\n")
+status_category_summary <- status_at_transplant_categorized_clean %>%
+  count(status_label, complication_category) %>%
+  group_by(status_label) %>%
+  mutate(
+    percent = n / sum(n) * 100
+  ) %>%
+  arrange(status_label, desc(n))
+print(status_category_summary)
+
+# Add total counts by status
+cat("\n=== TOTAL BY STATUS ===\n")
+status_totals <- status_at_transplant_categorized_clean %>%
+  count(status_label) %>%
+  mutate(
+    percent = n / sum(n) * 100,
+    display = sprintf("%d (%.1f%%)", n, percent)
+  )
+print(status_totals)
+
+# ============================================================================
+# PLOT: STATUS AT TRANSPLANT BY COMPLICATION CATEGORY
+# ============================================================================
+
+transplant_plot_by_category <- ggplot(status_at_transplant_categorized_clean, 
+                                      aes(x = factor(status_label, 
+                                                    levels = c("Status 1", "Status 2", 
+                                                              "Status 3", "Status 4")),
+                                          fill = factor(complication_category,
+                                                       levels = c("Durable LVAD",
+                                                                 "Discretionary LVAD Time",
+                                                                 "Objective LVAD Complications",
+                                                                 "Additional Hemodynamic/MCS Support",
+                                                                 "Exception",
+                                                                 "Other")))) + 
+  geom_bar(color = "black", linewidth = 0.3, position = position_stack(reverse = TRUE)) +
+  theme_classic() +
+  labs(x = "Status at Transplant", 
+       y = "Number of Transplant Recipients") +
+       #title = "Status Distribution at Transplant by Complication Type"
+  scale_fill_manual(
+    values = c("Durable LVAD" = "#374e55",
+              "Discretionary LVAD Time" = "#df8f44",
+              "Objective LVAD Complications" = "#00a1d5",
+              "Additional Hemodynamic/MCS Support" = "#b24745",
+              "Exception" = "#79af97"),
+    name = "Complication Type",
+    drop = FALSE
+  ) +
+  theme(
+    plot.title = element_text(size = 15, face = "bold"),
+    axis.text.x = element_text(size = 15),
+    axis.title.x = element_text(size = 15),
+    axis.text.y = element_text(size = 15),
+    axis.title.y = element_text(size = 15),
+    legend.title = element_text(size = 15, face = "bold"),
+    legend.position = "right",
+    legend.text = element_text(size = 15)
+  ) +
+  guides(fill = guide_legend(ncol = 1))
+
+print(transplant_plot_by_category)
+
+
+
+
+# # ============================================================================
+# # DETAILED BREAKDOWN: STATUS 3 BY CATEGORY
+# # ============================================================================
+# 
+# cat("\n=== STATUS 3 BREAKDOWN BY COMPLICATION TYPE ===\n")
+# status3_category_breakdown <- status_at_transplant_categorized_clean %>%
+#   filter(status_label == "Status 3") %>%
+#   count(complication_category, sort = TRUE) %>%
+#   mutate(
+#     percent = n / sum(n) * 100,
+#     display = sprintf("%d (%.1f%%)", n, percent)
+#   )
+# print(status3_category_breakdown)
+# 
+# # ============================================================================
+# # CROSSTAB: STATUS × CATEGORY
+# # ============================================================================
+# 
+# cat("\n=== CROSSTAB: STATUS × COMPLICATION CATEGORY ===\n")
+# crosstab <- status_at_transplant_categorized_clean %>%
+#   count(status_label, complication_category) %>%
+#   pivot_wider(names_from = complication_category, values_from = n, values_fill = 0) %>%
+#   arrange(status_label)
+# print(crosstab)
+
+# ============================================================================
+# SAVE CATEGORIZED DATA
+# ============================================================================
+
+
+```
+
+
+
+``` {r waitlist trends}
+lvad_keywords <- c(
+  "heartmate", "heart mate", "hm ii", "hm2", "hm 2", "hm3", "hm 3", "hm iii",
+  "hvad", "heartware", "heart ware",
+  "jarvik", "novacor", "worldheart", "world heart",
+  "thoratec", "lion heart", "lionheart",
+  "incor", "berlin heart", "berlinheart",
+  "duraheart", "evaheart", "syncardia", "cardiowest"
+)
+
+# ============================================================================
+# POLICY IMPACT OVER TIME - FULL WAITLIST ANALYSIS
+# ============================================================================
+
+library(lubridate)
+library(patchwork)
+
+# Define dates to check
+dates_to_check <- c(
+  mdy("10-18-2018"), 
+  seq(mdy("01-01-2019"), mdy("10-01-2024"), by = "3 months"),
+  mdy("01-01-2025"), mdy("04-01-2025"), mdy("06-01-2025")
+)
+
+
+# ============================================================================
+# POLICY IMPACT OVER TIME (EXCLUDING STATUS 5/6 FROM LVAD COUNTS)
+# ============================================================================
+
+# Function to get full waitlist status composition on a given date
+get_waitlist_status_full <- function(check_date) {
+  
+  cat("Processing date:", format(check_date, "%Y-%m-%d"), "\n")
+  
+  # Get all candidates on waitlist on this date
+  candidates_on_date <- cand_thor2025q2 %>%
+    filter(CAN_LISTING_DT <= check_date) %>%
+    filter(is.na(CAN_REM_DT) | CAN_REM_DT > check_date) %>%
+    filter(CAN_AGE_IN_MONTHS_AT_LISTING / 12 > 17) %>%
+    select(PX_ID, CAN_LISTING_DT, CAN_REM_DT)
+  
+  # Get their status on this date
+  status_on_date <- candidates_on_date %>%
+    left_join(
+      stathist_thor2025q2 %>%
+        select(PX_ID, CANHX_BEGIN_DT, CANHX_END_DT, CANHX_STAT_CD),
+      by = "PX_ID"
+    ) %>%
+    filter(
+      CANHX_BEGIN_DT <= check_date &
+        (is.na(CANHX_END_DT) | CANHX_END_DT >= check_date)
+    ) %>%
+    group_by(PX_ID) %>%
+    arrange(desc(CANHX_BEGIN_DT)) %>%
+    slice(1) %>%
+    ungroup() %>%
+    mutate(
+      status_numeric = case_when(
+        CANHX_STAT_CD == 2110 ~ 1,
+        CANHX_STAT_CD == 2120 ~ 2,
+        CANHX_STAT_CD == 2130 ~ 3,
+        CANHX_STAT_CD == 2140 ~ 4,
+        CANHX_STAT_CD == 2150 ~ 5,
+        CANHX_STAT_CD == 2160 ~ 6,
+        TRUE ~ 99
+      )
+    )
+  
+  # Get LVAD information for candidates
+  lvads_at_date <- thor_support_device %>%
+    filter(VadBrandId %in% c('202', '205', '206', '207', '208', '209', '210', '212', 
+                             '213', '214', '223', '224', '233', '236', '239', '240', 
+                             '312', '313', '314', '315', '316', '319', '322', '327', 
+                             '330', '333', '334') | 
+             (VadBrandId == 999 & grepl(paste(lvad_keywords, collapse = "|"), 
+                                        OtherSpecify, ignore.case = TRUE))) %>%
+    filter(ImplantDt <= check_date) %>%
+    select(PX_ID, ImplantDt) %>%
+    distinct() %>%
+    group_by(PX_ID) %>%
+    arrange(ImplantDt) %>%
+    slice(1) %>%
+    ungroup()
+  
+  # Join LVAD info to status
+  status_with_lvad <- status_on_date %>%
+    left_join(lvads_at_date, by = "PX_ID") %>%
+    mutate(
+      has_lvad_raw = !is.na(ImplantDt),
+      # EXCLUDE Status 5/6 from LVAD eligibility (presumed explanted)
+      has_lvad = has_lvad_raw & !status_numeric %in% c(5, 6),
+      time_on_lvad_days = if_else(
+        has_lvad,
+        as.numeric(difftime(check_date, ImplantDt, units = "days")),
+        NA_real_
+      ),
+      time_on_lvad_years = time_on_lvad_days / 365.25
+    )
+  
+  # Calculate policy eligibility for all three policies
+  status_with_policy <- status_with_lvad %>%
+    mutate(
+      # 6-8 YEAR POLICY
+      would_get_status3_6yr = has_lvad & 
+        status_numeric >= 4 & 
+        time_on_lvad_years >= 6 & 
+        time_on_lvad_years < 8,
+      would_get_status2_8yr = has_lvad & 
+        status_numeric >= 3 & 
+        time_on_lvad_years >= 8,
+      
+      # 5-7 YEAR POLICY
+      would_get_status3_5yr = has_lvad & 
+        status_numeric >= 4 & 
+        time_on_lvad_years >= 5 & 
+        time_on_lvad_years < 7,
+      would_get_status2_7yr = has_lvad & 
+        status_numeric >= 3 & 
+        time_on_lvad_years >= 7,
+      
+      # 2-4 YEAR POLICY (NEW)
+      would_get_status3_2yr = has_lvad & 
+        status_numeric >= 4 & 
+        time_on_lvad_years >= 2 & 
+        time_on_lvad_years < 4,
+      would_get_status2_4yr = has_lvad & 
+        status_numeric >= 3 & 
+        time_on_lvad_years >= 4
+    )
+  
+  # Actual counts
+  total_waitlist <- nrow(status_with_policy)
+  actual_status2 <- sum(status_with_policy$status_numeric == 2, na.rm = TRUE)
+  actual_status3 <- sum(status_with_policy$status_numeric == 3, na.rm = TRUE)
+  total_with_lvad <- sum(status_with_policy$has_lvad, na.rm = TRUE)
+  
+  # Additional patients under 6-8 year policy
+  additional_status3_6yr <- sum(status_with_policy$would_get_status3_6yr, na.rm = TRUE)
+  additional_status2_8yr <- sum(status_with_policy$would_get_status2_8yr, na.rm = TRUE)
+  status3_to_status2_6_8yr <- sum(status_with_policy$status_numeric == 3 & 
+                                   status_with_policy$would_get_status2_8yr, na.rm = TRUE)
+  
+  # Additional patients under 5-7 year policy
+  additional_status3_5yr <- sum(status_with_policy$would_get_status3_5yr, na.rm = TRUE)
+  additional_status2_7yr <- sum(status_with_policy$would_get_status2_7yr, na.rm = TRUE)
+  status3_to_status2_5_7yr <- sum(status_with_policy$status_numeric == 3 & 
+                                   status_with_policy$would_get_status2_7yr, na.rm = TRUE)
+  
+  # Additional patients under 2-4 year policy (NEW)
+  additional_status3_2yr <- sum(status_with_policy$would_get_status3_2yr, na.rm = TRUE)
+  additional_status2_4yr <- sum(status_with_policy$would_get_status2_4yr, na.rm = TRUE)
+  status3_to_status2_2_4yr <- sum(status_with_policy$status_numeric == 3 & 
+                                   status_with_policy$would_get_status2_4yr, na.rm = TRUE)
+  
+  # Expected totals (correcting for double-counting)
+  expected_status2_6_8yr <- actual_status2 + additional_status2_8yr
+  expected_status3_6_8yr <- actual_status3 + additional_status3_6yr - status3_to_status2_6_8yr
+  
+  expected_status2_5_7yr <- actual_status2 + additional_status2_7yr
+  expected_status3_5_7yr <- actual_status3 + additional_status3_5yr - status3_to_status2_5_7yr
+  
+  expected_status2_2_4yr <- actual_status2 + additional_status2_4yr
+  expected_status3_2_4yr <- actual_status3 + additional_status3_2yr - status3_to_status2_2_4yr
+  
+  return(data.frame(
+    date = check_date,
+    total_waitlist = total_waitlist,
+    total_with_lvad = total_with_lvad,
+    actual_status2 = actual_status2,
+    actual_status3 = actual_status3,
+    # 6-8 year policy
+    expected_status2_6_8yr = expected_status2_6_8yr,
+    expected_status3_6_8yr = expected_status3_6_8yr,
+    additional_status2_6_8yr = additional_status2_8yr,
+    additional_status3_6_8yr = additional_status3_6yr,
+    # 5-7 year policy
+    expected_status2_5_7yr = expected_status2_5_7yr,
+    expected_status3_5_7yr = expected_status3_5_7yr,
+    additional_status2_5_7yr = additional_status2_7yr,
+    additional_status3_5_7yr = additional_status3_5yr,
+    # 2-4 year policy (NEW)
+    expected_status2_2_4yr = expected_status2_2_4yr,
+    expected_status3_2_4yr = expected_status3_2_4yr,
+    additional_status2_2_4yr = additional_status2_4yr,
+    additional_status3_2_4yr = additional_status3_2yr
+  ))
+}
+
+# Apply function to all dates
+cat("\n=== CALCULATING POLICY IMPACT OVER TIME (EXCLUDING STATUS 5/6) ===\n")
+cat("Processing", length(dates_to_check), "dates...\n")
+
+status_over_time <- bind_rows(lapply(dates_to_check, get_waitlist_status_full))
+
+cat("Complete!\n")
+
+# Print summary
+cat("\n=== SUMMARY OF POLICY IMPACT (Most Recent Date) ===\n")
+recent <- status_over_time %>% filter(date == max(date))
+cat("Date:", format(recent$date, "%B %d, %Y"), "\n")
+cat("Total on waitlist:", recent$total_waitlist, "\n")
+cat("Total with LVAD (excluding Status 5/6):", recent$total_with_lvad, "\n\n")
+
+cat("ACTUAL:\n")
+cat("  Status 2:", recent$actual_status2, "\n")
+cat("  Status 3:", recent$actual_status3, "\n\n")
+
+cat("6-8 YEAR POLICY:\n")
+cat("  Expected Status 2:", recent$expected_status2_6_8yr, 
+    sprintf("(+%d)", recent$additional_status2_6_8yr), "\n")
+cat("  Expected Status 3:", recent$expected_status3_6_8yr,
+    sprintf("(+%d)", recent$additional_status3_6_8yr), "\n\n")
+
+cat("5-7 YEAR POLICY:\n")
+cat("  Expected Status 2:", recent$expected_status2_5_7yr,
+    sprintf("(+%d)", recent$additional_status2_5_7yr), "\n")
+cat("  Expected Status 3:", recent$expected_status3_5_7yr,
+    sprintf("(+%d)", recent$additional_status3_5_7yr), "\n\n")
+
+cat("2-4 YEAR POLICY:\n")
+cat("  Expected Status 2:", recent$expected_status2_2_4yr,
+    sprintf("(+%d)", recent$additional_status2_2_4yr), "\n")
+cat("  Expected Status 3:", recent$expected_status3_2_4yr,
+    sprintf("(+%d)", recent$additional_status3_2_4yr), "\n")
+
+
+
+
+
+
+
+
+# ============================================================================
+# CALCULATE PERCENTAGE OF WAITLIST UPGRADED UNDER EACH POLICY
+# ============================================================================
+
+policy_upgrade_pct <- status_over_time %>%
+  mutate(
+    # Total additional upgrades under each policy
+    total_upgraded_6_8yr = additional_status2_6_8yr + additional_status3_6_8yr,
+    total_upgraded_5_7yr = additional_status2_5_7yr + additional_status3_5_7yr,
+    total_upgraded_2_4yr = additional_status2_2_4yr + additional_status3_2_4yr,
+    
+    # Percentage of waitlist upgraded
+    pct_upgraded_6_8yr = 100 * total_upgraded_6_8yr / total_waitlist,
+    pct_upgraded_5_7yr = 100 * total_upgraded_5_7yr / total_waitlist,
+    pct_upgraded_2_4yr = 100 * total_upgraded_2_4yr / total_waitlist
+  ) %>%
+  arrange(date) %>%
+  mutate(
+    date_label = format(date, "%b %d, %Y"),
+    date_factor = factor(date_label, levels = date_label)
+  )
+
+# Summary
+cat("\n=== PERCENTAGE OF WAITLIST UPGRADED (Most Recent Date) ===\n")
+recent_pct <- policy_upgrade_pct %>% filter(date == max(date))
+cat("Date:", format(recent_pct$date, "%B %d, %Y"), "\n")
+cat("Total waitlist:", recent_pct$total_waitlist, "\n\n")
+
+cat("6-8 YEAR POLICY:\n")
+cat("  Total upgraded:", recent_pct$total_upgraded_6_8yr, 
+    sprintf("(%.2f%% of waitlist)", recent_pct$pct_upgraded_6_8yr), "\n")
+cat("    To Status 3:", recent_pct$additional_status3_6_8yr, "\n")
+cat("    To Status 2:", recent_pct$additional_status2_6_8yr, "\n\n")
+
+cat("5-7 YEAR POLICY:\n")
+cat("  Total upgraded:", recent_pct$total_upgraded_5_7yr, 
+    sprintf("(%.2f%% of waitlist)", recent_pct$pct_upgraded_5_7yr), "\n")
+cat("    To Status 3:", recent_pct$additional_status3_5_7yr, "\n")
+cat("    To Status 2:", recent_pct$additional_status2_5_7yr, "\n\n")
+
+cat("2-4 YEAR POLICY:\n")
+cat("  Total upgraded:", recent_pct$total_upgraded_2_4yr, 
+    sprintf("(%.2f%% of waitlist)", recent_pct$pct_upgraded_2_4yr), "\n")
+cat("    To Status 3:", recent_pct$additional_status3_2_4yr, "\n")
+cat("    To Status 2:", recent_pct$additional_status2_2_4yr, "\n")
+
+# ============================================================================
+# PLOT: PERCENTAGE OF WAITLIST UPGRADED
+# ============================================================================
+upgrade_pct_data <- policy_upgrade_pct %>%
+  select(date, date_factor, pct_upgraded_6_8yr, pct_upgraded_5_7yr, pct_upgraded_2_4yr) %>%
+  pivot_longer(cols = c(pct_upgraded_6_8yr, pct_upgraded_5_7yr, pct_upgraded_2_4yr),
+               names_to = "policy",
+               values_to = "pct_upgraded") %>%
+  mutate(
+    policy_label = case_when(
+      policy == "pct_upgraded_6_8yr" ~ "6-8 Year Policy",
+      policy == "pct_upgraded_5_7yr" ~ "5-7 Year Policy",
+      policy == "pct_upgraded_2_4yr" ~ "2-4 Year Policy"
+    ),
+    policy_label = factor(policy_label, levels = c("6-8 Year Policy", "5-7 Year Policy", "2-4 Year Policy"))
+  )
+
+plot_upgrade_pct <- ggplot(upgrade_pct_data, 
+                           aes(x = date_factor, y = pct_upgraded,
+                               color = policy_label,
+                               linetype = policy_label,
+                               group = policy_label)) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 2.5) +
+  scale_color_manual(
+    values = c("6-8 Year Policy" = "#2E86AB",
+               "5-7 Year Policy" = "#B22222",
+               "2-4 Year Policy" = "#228B22"),
+    name = ""
+  ) +
+  scale_linetype_manual(
+    values = c("6-8 Year Policy" = "dashed",
+               "5-7 Year Policy" = "dotted",
+               "2-4 Year Policy" = "solid"),
+    name = ""
+  ) +
+  scale_y_continuous(labels = function(x) paste0(x, "%"),
+                     limits = c(0, 50),
+                     expand = expansion(mult = c(0, 0.05))) +
+  labs(
+    #title = "Percentage of Waitlist Eligible for Status Upgrade",
+    #subtitle = "LVAD eligibility excludes Status 5/6",
+    x = "Date",
+    y = "% of Total Waitlist Upgraded"
+  ) +
+  theme_classic() +
+  theme(
+    plot.title = element_text(size = 16, face = "bold"),
+    plot.subtitle = element_text(size = 12, color = "gray30"),
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 15),
+    axis.text.y = element_text(size = 15),
+    axis.title = element_text(size = 15),
+    legend.position = "right",
+    legend.text = element_text(size = 15)
+  )
+
+print(plot_upgrade_pct)
+
+
+
+
+
+
+
+
+
+
+
+
+
+policy_upgrade_table <- policy_upgrade_pct %>%
+  select(date_label, total_waitlist, 
+         total_upgraded_6_8yr, pct_upgraded_6_8yr,
+         total_upgraded_5_7yr, pct_upgraded_5_7yr,
+         total_upgraded_2_4yr, pct_upgraded_2_4yr) %>%
+  mutate(
+    pct_upgraded_6_8yr = sprintf("%.2f%%", pct_upgraded_6_8yr),
+    pct_upgraded_5_7yr = sprintf("%.2f%%", pct_upgraded_5_7yr),
+    pct_upgraded_2_4yr = sprintf("%.2f%%", pct_upgraded_2_4yr)
+  ) %>%
+  rename(
+    Date = date_label,
+    `Total Waitlist` = total_waitlist,
+    `6-8yr Upgraded (N)` = total_upgraded_6_8yr,
+    `6-8yr Upgraded (%)` = pct_upgraded_6_8yr,
+    `5-7yr Upgraded (N)` = total_upgraded_5_7yr,
+    `5-7yr Upgraded (%)` = pct_upgraded_5_7yr,
+    `2-4yr Upgraded (N)` = total_upgraded_2_4yr,
+    `2-4yr Upgraded (%)` = pct_upgraded_2_4yr
+  )
+
+cat("\n=== POLICY UPGRADE TABLE ===\n")
+print(policy_upgrade_table)
+
+recent_pct <- policy_upgrade_pct %>% filter(date == as.Date("2025-06-01"))
+print(recent_pct$total_upgraded_2_4yr)
+print(recent_pct$additional_status3_2_4yr) 
+print(recent_pct$additional_status2_2_4yr)
+
+
+
+
+
+# Convert to gt table
+library(gt)
+
+policy_upgrade_gt <- policy_upgrade_table %>%
+  gt() %>%
+  tab_header(
+    title = "LVAD Status Upgrades by Policy Scenario",
+    subtitle = "Individual patients upgraded at each timepoint"
+  ) %>%
+  tab_spanner(
+    label = "6-8 Year Policy",
+    columns = c(`6-8yr Upgraded (N)`, `6-8yr Upgraded (%)`)
+  ) %>%
+  tab_spanner(
+    label = "5-7 Year Policy",
+    columns = c(`5-7yr Upgraded (N)`, `5-7yr Upgraded (%)`)
+  ) %>%
+  tab_spanner(
+    label = "2-4 Year Policy",
+    columns = c(`2-4yr Upgraded (N)`, `2-4yr Upgraded (%)`)
+  ) %>%
+  cols_label(
+    `6-8yr Upgraded (N)` = "N",
+    `6-8yr Upgraded (%)` = "%",
+    `5-7yr Upgraded (N)` = "N",
+    `5-7yr Upgraded (%)` = "%",
+    `2-4yr Upgraded (N)` = "N",
+    `2-4yr Upgraded (%)` = "%"
+  ) %>%
+  tab_style(
+    style = cell_text(weight = "bold"),
+    locations = cells_column_labels()
+  ) %>%
+  tab_style(
+    style = cell_text(weight = "bold"),
+    locations = cells_column_spanners()
+  ) %>%
+  tab_options(
+    table.font.size = px(12),
+    heading.title.font.size = px(16),
+    heading.subtitle.font.size = px(14)
+  )
+
+print(policy_upgrade_gt)
+```
+
+
+
+
+``` {r lvad distribution}
+
+# Modified function that includes policy simulations (INCLUDING 2-4 YEAR POLICY)
+get_lvad_status_distribution_with_policy <- function(check_date) {
+  
+  cat("Processing date:", format(check_date, "%Y-%m-%d"), "\n")
+  
+  # Get active candidates on this date
+  candidates_on_date <- cand_thor2025q2 %>%
+    filter(CAN_LISTING_DT <= check_date) %>%
+    filter(is.na(CAN_REM_DT) | CAN_REM_DT > check_date) %>%
+    filter(CAN_AGE_IN_MONTHS_AT_LISTING / 12 > 17) %>%
+    select(PX_ID, CAN_LISTING_DT, CAN_REM_DT)
+  
+  # Get current status on this date
+  status_on_date <- candidates_on_date %>%
+    left_join(
+      stathist_thor2025q2 %>%
+        select(PX_ID, CANHX_BEGIN_DT, CANHX_END_DT, CANHX_STAT_CD),
+      by = "PX_ID"
+    ) %>%
+    filter(
+      CANHX_BEGIN_DT <= check_date &
+        (is.na(CANHX_END_DT) | CANHX_END_DT >= check_date)
+    ) %>%
+    group_by(PX_ID) %>%
+    arrange(desc(CANHX_BEGIN_DT)) %>%
+    slice(1) %>%
+    ungroup() %>%
+    mutate(
+      status_numeric = case_when(
+        CANHX_STAT_CD == 2110 ~ 1,
+        CANHX_STAT_CD == 2120 ~ 2,
+        CANHX_STAT_CD == 2130 ~ 3,
+        CANHX_STAT_CD == 2140 ~ 4,
+        CANHX_STAT_CD == 2150 ~ 5,
+        CANHX_STAT_CD == 2160 ~ 6,
+        TRUE ~ 99
+      )
+    )
+  
+  # Get LVAD implant dates
+  lvads_at_date <- thor_support_device %>%
+    filter(VadBrandId %in% c('202', '205', '206', '207', '208', '209', '210', '212', 
+                             '213', '214', '223', '224', '233', '236', '239', '240', 
+                             '312', '313', '314', '315', '316', '319', '322', '327', 
+                             '330', '333', '334') | 
+             (VadBrandId == 999 & grepl(paste(lvad_keywords, collapse = "|"), 
+                                        OtherSpecify, ignore.case = TRUE))) %>%
+    filter(ImplantDt <= check_date) %>%
+    select(PX_ID, ImplantDt) %>%
+    distinct() %>%
+    group_by(PX_ID) %>%
+    arrange(ImplantDt) %>%
+    slice(1) %>%
+    ungroup()
+  
+  # Combine and exclude Status 5/6
+  lvad_patients_status <- status_on_date %>%
+    inner_join(lvads_at_date, by = "PX_ID") %>%
+    filter(!status_numeric %in% c(5, 6)) %>%
+    mutate(
+      ImplantDt = as.Date(ImplantDt),
+      check_date = as.Date(check_date),
+      time_on_device_days = as.numeric(check_date - ImplantDt),
+      time_on_device_years = time_on_device_days / 365.25,
+      
+      # Current status (baseline)
+      current_status = status_numeric,
+      
+      # Status under 6-8 year policy
+      status_6_8_policy = case_when(
+        current_status %in% c(1, 2, 3, 4) & time_on_device_years >= 8 ~ pmin(2, current_status),
+        current_status %in% c(1, 2, 3, 4) & time_on_device_years >= 6 ~ pmin(3, current_status),
+        TRUE ~ current_status
+      ),
+      
+      # Status under 5-7 year policy
+      status_5_7_policy = case_when(
+        current_status %in% c(1, 2, 3, 4) & time_on_device_years >= 7 ~ pmin(2, current_status),
+        current_status %in% c(1, 2, 3, 4) & time_on_device_years >= 5 ~ pmin(3, current_status),
+        TRUE ~ current_status
+      ),
+      
+      # Status under 2-4 year policy
+      status_2_4_policy = case_when(
+        current_status %in% c(1, 2, 3, 4) & time_on_device_years >= 4 ~ pmin(2, current_status),
+        current_status %in% c(1, 2, 3, 4) & time_on_device_years >= 2 ~ pmin(3, current_status),
+        TRUE ~ current_status
+      )
+    )
+  
+  # Create status labels
+  create_status_label <- function(status_num) {
+    case_when(
+      status_num == 1 ~ "Status 1",
+      status_num == 2 ~ "Status 2",
+      status_num == 3 ~ "Status 3",
+      status_num == 4 ~ "Status 4",
+      TRUE ~ "Inactive"
+    )
+  }
+  
+  # Count current status distribution
+  current_counts <- lvad_patients_status %>%
+    count(current_status) %>%
+    mutate(
+      status_label = create_status_label(current_status),
+      scenario = "Current",
+      date = check_date,
+      total_lvad = sum(n),
+      pct = 100 * n / total_lvad
+    ) %>%
+    rename(status_numeric = current_status)
+  
+  # Count under 6-8 year policy
+  policy_6_8_counts <- lvad_patients_status %>%
+    count(status_6_8_policy) %>%
+    mutate(
+      status_label = create_status_label(status_6_8_policy),
+      scenario = "6-8 Year Policy",
+      date = check_date,
+      total_lvad = sum(n),
+      pct = 100 * n / total_lvad
+    ) %>%
+    rename(status_numeric = status_6_8_policy)
+  
+  # Count under 5-7 year policy
+  policy_5_7_counts <- lvad_patients_status %>%
+    count(status_5_7_policy) %>%
+    mutate(
+      status_label = create_status_label(status_5_7_policy),
+      scenario = "5-7 Year Policy",
+      date = check_date,
+      total_lvad = sum(n),
+      pct = 100 * n / total_lvad
+    ) %>%
+    rename(status_numeric = status_5_7_policy)
+  
+  # Count under 2-4 year policy
+  policy_2_4_counts <- lvad_patients_status %>%
+    count(status_2_4_policy) %>%
+    mutate(
+      status_label = create_status_label(status_2_4_policy),
+      scenario = "2-4 Year Policy",
+      date = check_date,
+      total_lvad = sum(n),
+      pct = 100 * n / total_lvad
+    ) %>%
+    rename(status_numeric = status_2_4_policy)
+  
+  # ALSO RETURN INDIVIDUAL UPGRADE COUNTS
+  upgrades_6_8 <- lvad_patients_status %>%
+    filter(current_status != status_6_8_policy) %>%
+    summarize(
+      upgraded_to_status3 = sum(status_6_8_policy == 3),
+      upgraded_to_status2 = sum(status_6_8_policy == 2),
+      total_upgraded = n()
+    ) %>%
+    mutate(scenario = "6-8 Year Policy", date = check_date)
+  
+  upgrades_5_7 <- lvad_patients_status %>%
+    filter(current_status != status_5_7_policy) %>%
+    summarize(
+      upgraded_to_status3 = sum(status_5_7_policy == 3),
+      upgraded_to_status2 = sum(status_5_7_policy == 2),
+      total_upgraded = n()
+    ) %>%
+    mutate(scenario = "5-7 Year Policy", date = check_date)
+  
+  upgrades_2_4 <- lvad_patients_status %>%
+    filter(current_status != status_2_4_policy) %>%
+    summarize(
+      upgraded_to_status3 = sum(status_2_4_policy == 3),
+      upgraded_to_status2 = sum(status_2_4_policy == 2),
+      total_upgraded = n()
+    ) %>%
+    mutate(scenario = "2-4 Year Policy", date = check_date)
+  
+  all_upgrades <- bind_rows(upgrades_6_8, upgrades_5_7, upgrades_2_4)
+  
+  # Combine all scenarios
+  all_counts <- bind_rows(current_counts, policy_6_8_counts, policy_5_7_counts, policy_2_4_counts)
+  
+  return(list(counts = all_counts, upgrades = all_upgrades))
+}
+
+# Run analysis for all dates
+cat("\n=== CALCULATING LVAD STATUS DISTRIBUTIONS WITH POLICY SCENARIOS ===\n")
+all_results <- lapply(dates_to_check, get_lvad_status_distribution_with_policy)
+
+# Extract counts and upgrades
+lvad_status_all_scenarios <- bind_rows(lapply(all_results, function(x) x$counts))
+total_upgrades <- bind_rows(lapply(all_results, function(x) x$upgrades))
+
+# Prepare data for plotting
+lvad_status_all_scenarios <- lvad_status_all_scenarios %>%
+  arrange(date, scenario) %>%
+  mutate(
+    date_label = format(date, "%b %d, %Y"),
+    date_factor = factor(date_label, levels = unique(date_label)),
+    scenario = factor(scenario, levels = c("Current", "6-8 Year Policy", "5-7 Year Policy", "2-4 Year Policy"))
+  )
+
+# Color scheme
+status_colors <- c(
+  "Status 1" = "#79af97",
+  "Status 2" = "#b24745",
+  "Status 3" = "#df8f44",
+  "Status 4" = "#00a1d5",
+  "Inactive" = "#A9A9A9"
+)
+
+# Plot: All scenarios side by side
+plot_all_scenarios <- lvad_status_all_scenarios %>%
+  ggplot(aes(x = date_factor, y = n, fill = status_label)) +
+  geom_col(position = "stack", color = "black", linewidth = 0.2) +
+  facet_wrap(~scenario, ncol = 1) +
+  scale_fill_manual(values = status_colors, name = "Status") +
+  scale_y_continuous(labels = scales::comma, limits = c(0, NA), 
+                     expand = expansion(mult = c(0, 0.05))) +
+  labs(
+    x = "",
+    y = "Number of LVAD Patients"
+  ) +
+  theme_classic() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 15),
+    axis.text.y = element_text(size = 15),
+    axis.title = element_text(size = 15),
+    legend.position = "right",
+    legend.text = element_text(size = 15),
+    legend.title = element_text(size = 15, face = "bold"),
+    strip.text = element_text(size = 15, face = "bold"),
+    strip.background = element_rect(fill = "gray90")
+  )
+
+print(plot_all_scenarios)
+
+
+
+```
+
+``` {r lvad duration plot}
+
+# Function to get LVAD duration stratification WITH TOTAL WAITLIST
+get_lvad_duration_distribution <- function(check_date) {
+  
+  cat("Processing date:", format(check_date, "%Y-%m-%d"), "\n")
+  
+  # Get candidates active on this date (ALL candidates, not just LVAD)
+  candidates_on_date <- cand_thor2025q2 %>%
+    filter(CAN_LISTING_DT <= check_date) %>%
+    filter(is.na(CAN_REM_DT) | CAN_REM_DT > check_date) %>%
+    filter(CAN_AGE_IN_MONTHS_AT_LISTING / 12 > 17) %>%
+    select(PX_ID, CAN_LISTING_DT, CAN_REM_DT)
+  
+  total_waitlist <- nrow(candidates_on_date)  # CAPTURE TOTAL BEFORE FILTERING
+  
+  # Get status on this date
+  status_on_date <- candidates_on_date %>%
+    left_join(
+      stathist_thor2025q2 %>%
+        select(PX_ID, CANHX_BEGIN_DT, CANHX_END_DT, CANHX_STAT_CD),
+      by = "PX_ID"
+    ) %>%
+    filter(
+      CANHX_BEGIN_DT <= check_date &
+        (is.na(CANHX_END_DT) | CANHX_END_DT >= check_date)
+    ) %>%
+    group_by(PX_ID) %>%
+    arrange(desc(CANHX_BEGIN_DT)) %>%
+    slice(1) %>%
+    ungroup() %>%
+    mutate(
+      status_numeric = case_when(
+        CANHX_STAT_CD == 2110 ~ 1,
+        CANHX_STAT_CD == 2120 ~ 2,
+        CANHX_STAT_CD == 2130 ~ 3,
+        CANHX_STAT_CD == 2140 ~ 4,
+        CANHX_STAT_CD == 2150 ~ 5,
+        CANHX_STAT_CD == 2160 ~ 6,
+        TRUE ~ 99
+      )
+    )
+  
+  # Get LVADs implanted before this date
+  lvads_at_date <- thor_support_device %>%
+    filter(VadBrandId %in% c('202', '205', '206', '207', '208', '209', '210', '212', 
+                             '213', '214', '223', '224', '233', '236', '239', '240', 
+                             '312', '313', '314', '315', '316', '319', '322', '327', 
+                             '330', '333', '334') | 
+             (VadBrandId == 999 & grepl(paste(lvad_keywords, collapse = "|"), 
+                                        OtherSpecify, ignore.case = TRUE))) %>%
+    filter(ImplantDt <= check_date) %>%
+    select(PX_ID, ImplantDt) %>%
+    distinct() %>%
+    group_by(PX_ID) %>%
+    arrange(ImplantDt) %>%
+    slice(1) %>%  # Take first LVAD implant
+    ungroup()
+  
+  # Combine: active candidates with LVADs (excluding Status 5/6)
+  lvad_patients <- status_on_date %>%
+    inner_join(lvads_at_date, by = "PX_ID") %>%
+    filter(!status_numeric %in% c(5, 6)) %>%
+    mutate(
+      ImplantDt = as.Date(ImplantDt),
+      check_date = as.Date(check_date),
+      time_on_device_days = as.numeric(check_date - ImplantDt),
+      time_on_device_years = time_on_device_days / 365.25,
+      duration_category = case_when(
+        time_on_device_years < 6 ~ "<6 Years",
+        time_on_device_years >= 6 & time_on_device_years < 8 ~ "6-8 Years",
+        time_on_device_years >= 8 ~ "≥8 Years",
+        TRUE ~ NA_character_
+      )
+    )
+  
+  # Count by duration category
+  duration_counts <- lvad_patients %>%
+    count(duration_category) %>%
+    mutate(
+      date = check_date,
+      total_waitlist = total_waitlist,  # ADD TOTAL WAITLIST
+      total_lvad = sum(n),
+      pct = 100 * n / total_lvad
+    )
+  
+  return(duration_counts)
+}
+
+# Use the same dates as other analyses
+dates_to_check <- c(
+  mdy("10-18-2018"), 
+  seq(mdy("01-01-2019"), mdy("10-01-2024"), by = "3 months"),
+  mdy("01-01-2025"), mdy("04-01-2025"), mdy("06-01-2025")
+)
+
+# Run for all snapshot dates
+snapshot_results <- map_df(dates_to_check, get_lvad_duration_distribution)
+
+# Prepare data for plotting with factor for equidistant spacing
+snapshot_summary <- snapshot_results %>%
+  arrange(date) %>%
+  mutate(
+    date_label = format(date, "%b %d, %Y"),
+    date_factor = factor(date_label, levels = unique(date_label)),
+    duration_category = factor(duration_category, 
+                               levels = c("≥8 Years", "6-8 Years", "<6 Years")),
+    proportion = n / total_lvad
+  )
+
+# Create stacked bar chart - ABSOLUTE NUMBERS
+p1 <- ggplot(snapshot_summary, 
+             aes(x = date_factor, y = n, fill = duration_category)) +
+  geom_bar(stat = "identity") +
+  scale_fill_manual(
+    values = c("≥8 Years" = "#d62728",     # Red for longest duration
+               "6-8 Years" = "#ff7f0e",    # Orange
+               "<6 Years" = "#1f77b4"),    # Blue for shortest
+    name = "Time on LVAD"
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
+  labs(
+    #title = "Active LVAD Candidates by Device Duration",
+    x = "Date",
+    y = "Number of Active Candidates"
+  ) +
+  theme_classic() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 15),
+    axis.text.y = element_text(size = 15),
+    axis.title.x = element_text(size = 15),
+    axis.title.y = element_text(size = 15),
+    plot.title = element_text(size = 15, face = "bold"),
+    legend.position = "bottom",
+    legend.text = element_text(size = 15),
+    legend.title = element_text(size = 15, face = "bold")
+  )
+
+print(p1)
+
+# Create summary tables
+growth_summary <- snapshot_summary %>%
+  filter(duration_category == "≥8 Years") %>%
+  arrange(date) %>%
+  select(date, n, total_lvad, total_waitlist, proportion, pct) %>%
+  mutate(
+    date_formatted = format(date, "%b %Y"),
+    pct_of_total_waitlist = 100 * n / total_waitlist
+  )
+
+print(growth_summary)
+
+all_categories_summary <- snapshot_summary %>%
+  select(date, duration_category, n, pct, total_waitlist, total_lvad) %>%
+  pivot_wider(names_from = duration_category, 
+              values_from = c(n, pct),
+              names_glue = "{duration_category}_{.value}") %>%
+  arrange(date) %>%
+  # total_waitlist and total_lvad will be duplicated for each category, so take the first unique value per date
+  group_by(date) %>%
+  mutate(
+    total_waitlist = first(total_waitlist),
+    total_lvad = first(total_lvad)
+  ) %>%
+  ungroup() %>%
+  # Round all percentage columns to 2 decimal places
+  mutate(across(ends_with("_pct"), ~round(., 1))) %>%
+  # Reorder columns to put total_waitlist and total_lvad first after date
+  select(date, total_waitlist, total_lvad, everything())
+
+print(all_categories_summary)
+
+
+library(gt)
+all_categories_summary %>%
+  mutate(date = format(date, "%b %d, %Y")) %>%
+  gt() %>%
+  tab_header(
+    title = "LVAD Duration Categories Over Time"
+  ) %>%
+  fmt_number(
+    columns = starts_with("n_"),
+    decimals = 0
+  ) %>%
+  fmt_number(
+    columns = starts_with("pct_"),
+    decimals = 1
+  ) %>%
+  cols_label(
+    date = "Date",
+    total_waitlist = "Total Waitlist",
+    total_lvad = "Total LVAD"
+  )
+
+
+
+# Print key statistics
+cat("\n=== SNAPSHOT ANALYSIS SUMMARY ===\n\n")
+
+first_date <- min(snapshot_summary$date)
+last_date <- max(snapshot_summary$date)
+
+cat(sprintf("First snapshot (%s):\n", format(first_date, "%b %Y")))
+first <- snapshot_summary %>% filter(date == first_date)
+print(first %>% select(duration_category, n, pct) %>% 
+        mutate(pct = sprintf("%.1f%%", pct)))
+
+cat(sprintf("\nMost recent snapshot (%s):\n", format(last_date, "%b %Y")))
+last <- snapshot_summary %>% filter(date == last_date)
+print(last %>% select(duration_category, n, pct) %>% 
+        mutate(pct = sprintf("%.1f%%", pct)))
+
+cat("\n=== GROWTH IN ≥6 YEAR CANDIDATES ===\n")
+first_6plus <- first %>% filter(duration_category == "≥6 years") %>% pull(n)
+last_6plus <- last %>% filter(duration_category == "≥6 years") %>% pull(n)
+first_6plus <- ifelse(length(first_6plus) == 0, 0, first_6plus)
+last_6plus <- ifelse(length(last_6plus) == 0, 0, last_6plus)
+
+cat(sprintf("October 2018: %d candidates\n", first_6plus))
+cat(sprintf("December 2024: %d candidates\n", last_6plus))
+if (first_6plus > 0) {
+  cat(sprintf("Absolute increase: %d candidates\n", last_6plus - first_6plus))
+  cat(sprintf("Fold increase: %.1fx\n", last_6plus / first_6plus))
+} else {
+  cat(sprintf("Absolute increase: %d candidates (started from zero)\n", last_6plus))
+}
+
+# Show total pool size change
+first_total <- first %>% pull(total_lvad) %>% unique()
+last_total <- last %>% pull(total_lvad) %>% unique()
+cat(sprintf("\nTotal active LVAD candidates:\n"))
+cat(sprintf("October 2018: %d candidates\n", first_total))
+cat(sprintf("December 2024: %d candidates\n", last_total))
+cat(sprintf("Change: %+d candidates (%.1f%% change)\n", 
+            last_total - first_total, 
+            100 * (last_total - first_total) / first_total))
+
+
+
+```
